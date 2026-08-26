@@ -1,0 +1,8 @@
+.env
+state.local.json
+__pycache__/
+*.pyc
+worker/.wrangler/
+node_modules/
+worker/_preview_*.html
+signals.log.bak
