@@ -340,28 +340,60 @@ export default {
   },
 
   // 감시견 — GitHub Actions 가 죽어도 이건 Cloudflare 가 돌린다.
+  // 평일 UTC 22:00 (KST 07:00). 미국장 마감 후라 그날 결과가 확정돼 있다.
   async scheduled(event, env, ctx) {
     const s = await getState(env);
-    const now = new Date();
-    const day = now.getUTCDay();
-    if (day === 0 || day === 6) return;               // 주말은 건너뛴다
-    if (!s.last_run) return;
-
-    const hours = (now - new Date(s.last_run)) / 3600e3;
-    if (hours > 12 && !s.watchdog_fired) {
-      s.watchdog_fired = true;
-      await putState(env, s);
-      ctx.waitUntil(tg(env, env.TELEGRAM_CHAT_ID,
-        `🚨 SOXL 봇이 ${hours.toFixed(0)}시간째 갱신되지 않았습니다.\n\n`
-        + `마지막 실행 ${kst(s.last_run)} KST\n\n`
-        + `GitHub Actions 가 멈췄거나 비활성화됐을 수 있습니다.\n`
-        + `저장소 → Actions 탭을 확인하세요.`));
-    } else if (hours <= 12 && s.watchdog_fired) {
-      delete s.watchdog_fired;
-      await putState(env, s);
-    }
+    const { text, patch } = watchdog(s, new Date());
+    if (patch) await putState(env, { ...s, ...patch });
+    if (text) ctx.waitUntil(tg(env, env.TELEGRAM_CHAT_ID, text));
   },
 };
+
+/** 뉴욕 기준 날짜 (YYYY-MM-DD). */
+function etDate(d) {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(d);
+}
+
+/**
+ * 하루 한 번 판정. 셋 중 하나다.
+ *   1) 갱신이 12시간 넘게 끊김        → 🚨 경보 (하루 1회만)
+ *   2) 정상인데 오늘 요약이 없었음    → 📭 휴장일 안내 (침묵 방지)
+ *   3) 오늘 요약이 이미 나갔음        → 조용히 넘어감
+ * 순수 함수라 로컬에서 테스트한다 (test_watchdog.mjs).
+ */
+export function watchdog(s, now) {
+  if (!s.last_run) return { text: null, patch: null };
+
+  const today = etDate(now);
+  const hours = (now - new Date(s.last_run)) / 3600e3;
+
+  if (hours > 12) {
+    if (s.watchdog_fired === today) return { text: null, patch: null };
+    return {
+      patch: { watchdog_fired: today },
+      text: `🚨 SOXL 봇이 ${hours.toFixed(0)}시간째 갱신되지 않았습니다.\n\n`
+        + `마지막 실행 ${kst(s.last_run)} KST\n\n`
+        + `GitHub Actions 가 멈췄거나 비활성화됐을 수 있습니다.\n`
+        + `저장소 → Actions 탭을 확인하세요.`,
+    };
+  }
+
+  const patch = s.watchdog_fired ? { watchdog_fired: null } : null;
+
+  if (s.last_summary_date === today) return { text: null, patch };
+
+  // 오늘 봉이 있었으면 거래일인데 요약이 늦은 것이고, 없으면 휴장일이다.
+  const barDay = s.last_bar ? etDate(new Date(s.last_bar)) : null;
+  const head = barDay === today
+    ? `📊 SOXL 일일 요약 (지연 발송)\n\n`
+    : `📭 오늘은 미국 증시 휴장일이었습니다.\n`
+      + `봇은 정상 동작 중입니다.\n\n`;
+
+  return {
+    patch: { ...(patch || {}), last_summary_date: today },
+    text: head + statusText(s),
+  };
+}
 
 // 로컬 스모크 테스트용. Worker 런타임에서는 무시된다.
 export { dashboard, levels, statusText, handleCommand, HELP };
