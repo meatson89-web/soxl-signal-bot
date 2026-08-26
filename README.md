@@ -13,13 +13,17 @@
 ## 구조
 
 ```
-GitHub Actions (15분마다)          Cloudflare
-  bot.py                            Worker "soxl-bot"
-   ├ Yahoo 5분봉 60일 조회            ├ POST /tg      텔레그램 명령 (즉시)
-   ├ 정규장 → 1시간봉 (7봉/일)        ├ GET /d/{경로}  대시보드
-   ├ RSI(12) Wilder                  └ cron          감시견 (매일 07:00 KST)
-   ├ 상태머신                                │
-   └ 텔레그램 발송                    KV "STATE"  ← 상태 단일 원본
+GitHub Actions (15분마다)          Cloudflare Worker "soxl-bot"
+  bot.py                             ├ POST /tg       텔레그램 명령 (즉시)
+   ├ Yahoo 5분봉 60일 조회            ├ GET  /d/{경로}  대시보드
+   ├ 정규장 → 1시간봉 (7봉/일)   ───► ├ GET/POST /sync  KV 읽기·쓰기
+   ├ RSI(12) Wilder                  ├ POST /notify    텔레그램 발송 대행
+   ├ 상태머신                         └ cron           감시견 (매일 07:00 KST)
+   └ /sync·/notify 호출                       │
+                                       KV "STATE"  ← 상태 단일 원본
+
+GitHub 에는 텔레그램 토큰도 Cloudflare API 토큰도 두지 않는다.
+BOT_SYNC_SECRET 하나로 Worker 통로만 열어준다.
 ```
 
 `bot.py` 는 **멱등**하다. "지금 몇 시냐"가 아니라 "KV 의 `last_bar` 이후

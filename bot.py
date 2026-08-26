@@ -91,53 +91,50 @@ def fetch_bars():
     raise RuntimeError("시세 수신 실패 — " + " | ".join(errors[-4:]))
 
 
-# ── 상태 저장소 (Cloudflare KV) ──────────────────────────────
+# ── 상태 저장소 ──────────────────────────────────────────────
+# KV 에 직접 붙지 않고 Worker 의 /sync 를 거친다. 그래야 GitHub 쪽에
+# Cloudflare API 토큰도 텔레그램 토큰도 두지 않아도 된다.
 class Store:
     def __init__(self, local):
         self.local = local
         if local:
             return
-        acct = env("CF_ACCOUNT_ID")
-        ns = env("CF_KV_NAMESPACE_ID")
-        self.base = ("https://api.cloudflare.com/client/v4/accounts/" + acct
-                     + "/storage/kv/namespaces/" + ns + "/values/")
-        self.headers = {"Authorization": "Bearer " + env("CF_API_TOKEN")}
+        self.base = env("WORKER_URL").rstrip("/")
+        self.headers = {"X-Bot-Secret": env("BOT_SYNC_SECRET")}
 
     def get(self, key):
         if self.local:
             if key != "state" or not LOCAL_STATE.exists():
                 return None
             return json.loads(LOCAL_STATE.read_text(encoding="utf-8"))
-        r = requests.get(self.base + key, headers=self.headers, timeout=20)
-        if r.status_code == 404:
-            return None
+        r = requests.get(self.base + "/sync", headers=self.headers, timeout=20)
         r.raise_for_status()
         return r.json()
 
     def put(self, key, value):
-        body = json.dumps(value, ensure_ascii=False)
         if self.local:
             if key == "state":
-                LOCAL_STATE.write_text(body, encoding="utf-8")
+                LOCAL_STATE.write_text(json.dumps(value, ensure_ascii=False),
+                                       encoding="utf-8")
             return
-        r = requests.put(self.base + key, headers=self.headers, timeout=20,
-                         files={"value": (None, body), "metadata": (None, "{}")})
+        r = requests.post(self.base + "/sync", headers=self.headers, timeout=20,
+                          json={key: value})
         r.raise_for_status()
 
 
-# ── 텔레그램 ─────────────────────────────────────────────────
+# ── 텔레그램 (Worker 가 대신 보낸다) ─────────────────────────
 def send(text, dry=False):
     print("--- TELEGRAM ---\n" + text + "\n----------------")
     if dry:
         return
     r = requests.post(
-        "https://api.telegram.org/bot" + env("TELEGRAM_BOT_TOKEN") + "/sendMessage",
-        json={"chat_id": env("TELEGRAM_CHAT_ID"), "text": text,
-              "disable_web_page_preview": True},
+        env("WORKER_URL").rstrip("/") + "/notify",
+        headers={"X-Bot-Secret": env("BOT_SYNC_SECRET")},
+        json={"text": text},
         timeout=20,
     )
     if not r.ok:
-        print("텔레그램 전송 실패: " + str(r.status_code) + " " + r.text,
+        print("알림 전송 실패: " + str(r.status_code) + " " + r.text,
               file=sys.stderr)
 
 

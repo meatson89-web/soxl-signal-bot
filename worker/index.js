@@ -305,6 +305,27 @@ export default {
       return new Response("ok");
     }
 
+    // GitHub Actions 전용. bot.py 가 KV 읽기·쓰기와 알림 발송을 여기로 보낸다.
+    // 덕분에 GitHub 에는 Cloudflare API 토큰도 텔레그램 토큰도 둘 필요가 없다.
+    if (url.pathname === "/sync" || url.pathname === "/notify") {
+      if (!env.BOT_SYNC_SECRET
+          || request.headers.get("X-Bot-Secret") !== env.BOT_SYNC_SECRET) {
+        return new Response("forbidden", { status: 403 });
+      }
+      if (url.pathname === "/notify") {
+        const { text } = await request.json();
+        await tg(env, env.TELEGRAM_CHAT_ID, text);
+        return new Response("ok");
+      }
+      if (request.method === "GET") {
+        return Response.json(await getState(env));
+      }
+      const body = await request.json();
+      if (body.state) await putState(env, body.state);
+      if (body.bars) await env.STATE.put("bars", JSON.stringify(body.bars));
+      return new Response("ok");
+    }
+
     if (request.method === "GET" && url.pathname === `/d/${env.DASH_PATH}`) {
       const [s, bars] = await Promise.all([
         getState(env),
