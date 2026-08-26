@@ -5,7 +5,7 @@ compatibility_date = "2026-08-01"
 # KV 네임스페이스. id 는 `wrangler kv namespace create STATE` 결과로 채운다.
 [[kv_namespaces]]
 binding = "STATE"
-id = "PUT_KV_NAMESPACE_ID_HERE"
+id = "67eb473e9a3344b5ace1c11b4eabf280"
 
 # 감시견 — 매 평일 UTC 22:00 (KST 07:00, 미국장 마감 후)
 [triggers]
