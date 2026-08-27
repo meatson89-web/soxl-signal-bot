@@ -49,7 +49,27 @@ def add_rsi(hourly: pd.DataFrame, length: int = RSI_LEN) -> pd.DataFrame:
     avg_gain = gain.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
     out["rsi"] = 100 - 100 / (1 + avg_gain / avg_loss)
+    # 예고 계산용 Wilder 평균. process() 도 to_hourly() 도 쓰지 않으므로
+    # 백테스트 값에는 영향이 없다. preview_rsi() 만 읽는다.
+    out["au"] = avg_gain
+    out["ad"] = avg_loss
     return out
+
+
+def preview_rsi(last_row, price, length: int = RSI_LEN):
+    """마지막 확정봉 상태에서 price 로 한 스텝만 굴린 RSI.
+
+    "지금 이 가격이 다음 정규장 봉 종가라면 RSI 가 얼마인가" 를 답한다.
+    표시·예고 전용이다. 상태머신은 이 값을 절대 쓰지 않는다 —
+    시간외 봉을 판정에 넣으면 백테스트가 무너진다(README 참조).
+    """
+    au, ad = last_row.get("au"), last_row.get("ad")
+    if au is None or ad is None or pd.isna(au) or pd.isna(ad):
+        return None
+    ch = float(price) - float(last_row["close"])
+    au = float(au) + (max(ch, 0.0) - float(au)) / length
+    ad = float(ad) + (max(-ch, 0.0) - float(ad)) / length
+    return 100.0 if ad == 0 else 100 - 100 / (1 + au / ad)
 
 
 def drop_incomplete(hourly: pd.DataFrame, now_utc: pd.Timestamp,

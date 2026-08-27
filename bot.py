@@ -46,8 +46,10 @@ def env(name, required=True):
 def fetch_yahoo():
     import yfinance as yf
 
+    # prepost=True — 프리장/애프터장 봉까지 받는다. 상태머신은 여전히
+    # to_hourly() 가 걸러낸 정규장 봉만 쓴다. 시간외 봉은 예고·급등락 감지 전용.
     df = yf.download(TICKER, interval="5m", period="60d", auto_adjust=False,
-                     prepost=False, progress=False, threads=False)
+                     prepost=True, progress=False, threads=False)
     if df is None or df.empty:
         raise RuntimeError("yfinance 응답이 비었습니다")
     if isinstance(df.columns, pd.MultiIndex):
@@ -60,6 +62,8 @@ def fetch_yahoo():
 def fetch_twelvedata(api_key):
     r = requests.get(
         "https://api.twelvedata.com/time_series",
+        # 예비 소스. 무료 플랜은 시간외를 안 주므로 이쪽으로 넘어가면
+        # 매매 판정은 그대로 돌고 시간외 예고만 조용해진다.
         params={"symbol": TICKER, "interval": "5min", "outputsize": 5000,
                 "timezone": "UTC", "apikey": api_key},
         timeout=30,
@@ -150,7 +154,114 @@ def et_label(iso):
     return pd.Timestamp(iso).tz_convert(ET).strftime("%m-%d %H:%M ET")
 
 
+# ── 세션 · 예고 · 급등락 ─────────────────────────────────────
+# 여기부터는 전부 "알림" 전용이다. state 의 status/entry/peak 은 건드리지 않는다.
+# 시간외 봉을 매매 판정에 넣으면 5년 CAGR 100.6%→34.1%, MDD -40.8%→-81.5% 로
+# 무너진다는 게 실측이다. 그래서 시간외는 끝까지 "예고" 로만 쓴다.
+MOVE_STEP = 5.0        # 급등락 알림 단계 (%). 5 / 10 / 15 … 마다 한 번씩.
+PRE_LABEL = {
+    "PRE_BUY":   ("\U0001F535", "매수 조건 충족"),
+    "PRE_ARM":   ("\U0001F7E2", "트레일링 발동선 도달"),
+    "PRE_TRAIL": ("\U0001F534", "트레일링 스탑 이탈"),
+    "PRE_HARD":  ("\u26AB", "하드스탑 이탈"),
+}
+
+
+def session_of(ts):
+    """봉 시각(ET)으로 세션 이름. Pine 쪽 sessName 과 같은 구분."""
+    t = ts.tz_convert(ET)
+    hm = t.hour * 60 + t.minute
+    if 9 * 60 + 30 <= hm < 16 * 60:
+        return "정규장"
+    if 4 * 60 <= hm < 9 * 60 + 30:
+        return "프리장"
+    if 16 * 60 <= hm < 20 * 60:
+        return "애프터장"
+    return "야간"
+
+
+def preview_events(state, price, rsi_live):
+    """지금 가격이 다음 정규장 봉 종가라면 신호가 되는가. 상태는 안 바꾼다."""
+    lv = S.levels(state)
+    out = []
+    if state["status"] == "FLAT":
+        if rsi_live is not None and rsi_live <= S.RSI_TH:
+            out.append({"kind": "PRE_BUY", "price": price, "rsi": rsi_live})
+        return out
+    if state["status"] == "HOLD" and price >= lv["arm"]:
+        out.append({"kind": "PRE_ARM", "price": price, "level": lv["arm"]})
+    if state["status"] == "ARMED" and price <= lv["trail"]:
+        out.append({"kind": "PRE_TRAIL", "price": price, "level": lv["trail"]})
+    if price <= lv["hard"]:
+        out.append({"kind": "PRE_HARD", "price": price, "level": lv["hard"]})
+    return out
+
+
+def dedup_previews(state, evs):
+    """조건이 한 번 풀렸다 다시 성립할 때만 재알림한다. 붙어 있는 동안은 조용."""
+    live = [e["kind"] for e in evs]
+    seen = set(state.get("pre_seen") or [])
+    state["pre_seen"] = live
+    return [e for e in evs if e["kind"] not in seen]
+
+
+def day_move(raw, now):
+    """직전 정규장 종가 대비 현재가. 프리장·애프터장 움직임까지 포함해서 본다."""
+    et = raw.index.tz_convert(ET)
+    rth = raw[(et.time >= S.RTH_OPEN) & (et.time < S.RTH_CLOSE) & (et.dayofweek < 5)]
+    if rth.empty:
+        return None
+    closes = rth["close"].groupby(rth.index.tz_convert(ET).date).last()
+    today = now.tz_convert(ET).date()
+    prior = closes[[d < today for d in closes.index]]
+    if prior.empty:
+        return None
+    base = float(prior.iloc[-1])
+    price = float(raw["close"].iloc[-1])
+    return {"base": base, "base_date": str(prior.index[-1]),
+            "price": price, "move": price / base - 1}
+
+
+def move_alert(state, mv, now):
+    """|변동| 이 5%p 단계를 새로 넘었을 때만. 같은 날 같은 방향은 재알림 없음."""
+    if mv is None:
+        return None
+    today = str(now.tz_convert(ET).date())
+    box = state.get("move_seen") or {}
+    if box.get("date") != today:
+        box = {"date": today, "up": 0.0, "down": 0.0}
+    side = "up" if mv["move"] >= 0 else "down"
+    step = abs(mv["move"]) * 100 // MOVE_STEP * MOVE_STEP
+    fired = None
+    if step >= MOVE_STEP and step > box[side]:
+        box[side] = step
+        fired = dict(mv, step=step, side=side)
+    state["move_seen"] = box
+    return fired
+
+
 # ── 메시지 ───────────────────────────────────────────────────
+def render_preview(ev, sess, at):
+    icon, name = PRE_LABEL[ev["kind"]]
+    out = (icon + " [예고 · " + sess + "]  SOXL " + name + "\n"
+           + kst(at.isoformat()) + " KST   (" + et_label(at.isoformat()) + ")\n\n"
+           + "현재가 $%.2f\n" % ev["price"])
+    if ev["kind"] == "PRE_BUY":
+        out += "예상 RSI(12) %.1f  ≤ %g\n" % (ev["rsi"], S.RSI_TH)
+    else:
+        out += "기준선 $%.2f  (%+.1f%%)\n" % (
+            ev["level"], (ev["price"] / ev["level"] - 1) * 100)
+    return out + "\n※ 아직 확정 아닙니다. 정규장 1시간봉 종가로만 확정됩니다."
+
+
+def render_move(mv, sess):
+    arrow = "\U0001F680 급등" if mv["side"] == "up" else "\U0001F4A5 급락"
+    return (arrow + " [" + sess + "]  SOXL %+.1f%%\n\n" % (mv["move"] * 100)
+            + "직전 정규장 종가 $%.2f  (%s)\n" % (mv["base"], mv["base_date"])
+            + "현재가 $%.2f\n\n" % mv["price"]
+            + "매매 신호가 아닙니다. 시세 변동 알림입니다.")
+
+
 def render_event(ev, state):
     when = kst(ev["at"]) + " KST   (봉 " + et_label(ev["at"]) + ")"
     k = ev["kind"]
@@ -256,10 +367,14 @@ def main():
         return 0
 
     last_bar = state.get("last_bar")
+    cold = not last_bar
     if last_bar:
         fresh = hourly[hourly.index > pd.Timestamp(last_bar)]
     else:
-        fresh = hourly.tail(1)
+        # 첫 실행은 최근 이력을 통째로 흘려 현재 포지션을 복원한다.
+        # tail(1) 로 시작하면 직전 매수 신호를 건너뛰어 KV 가 FLAT 으로 굳는다.
+        # 2026-08 에 실제로 그래서 보유 중인데 미보유로 잡혀 있었다.
+        fresh = hourly
     print("[" + source + "] 확정봉 %d개, 신규 %d개, 마지막 %s"
           % (len(hourly), len(fresh), hourly.index[-1]))
 
@@ -268,13 +383,19 @@ def main():
     if len(fresh):
         state, events = S.process(state, fresh)
         for ev in events:
-            messages.append(render_event(ev, state))
             with SIGNAL_LOG.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
+            if cold:          # 복원 중이다. 과거 신호를 쏟아내지 않는다.
+                continue
+            messages.append(render_event(ev, state))
             if ev["kind"] == "SELL_HARD":
                 state["urgent"] = {"text": messages[-1], "left": 2}
         # 대시보드에 띄울 최근 신호 이력
         state["recent"] = (state.get("recent", []) + events)[-8:]
+        if cold:
+            messages.append("\U0001F195 SOXL 봇 상태 초기화\n최근 %d봉을 재생해 "
+                            "현재 상태를 복원했습니다.\n\n" % len(fresh)
+                            + render_summary(state))
 
     # 하드스탑은 놓치면 안 되므로 15분 간격으로 2회 더 재발송한다.
     urgent = state.get("urgent")
@@ -292,6 +413,21 @@ def main():
                 or args.force_summary:
             messages.append(render_summary(state))
             state["last_summary_date"] = day
+
+    # ── 시간외 포함 즉시 알림 ────────────────────────────────
+    # 봉 마감을 기다리지 않는다. 프리장·애프터장에도 그대로 돈다.
+    # 어느 쪽도 status/entry/peak 을 건드리지 않으므로 백테스트는 그대로다.
+    tick_at = raw.index[-1]
+    price = float(raw["close"].iloc[-1])
+    sess = session_of(tick_at)
+
+    rsi_live = S.preview_rsi(hourly.iloc[-1], price)
+    for ev in dedup_previews(state, preview_events(state, price, rsi_live)):
+        messages.append(render_preview(ev, sess, tick_at))
+
+    hit = move_alert(state, day_move(raw, now), now)
+    if hit:
+        messages.append(render_move(hit, sess))
 
     state["last_run"] = now.isoformat()
     state.pop("last_error", None)
