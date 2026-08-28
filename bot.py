@@ -154,11 +154,29 @@ def et_label(iso):
     return pd.Timestamp(iso).tz_convert(ET).strftime("%m-%d %H:%M ET")
 
 
+# 봉 인덱스는 봉의 '시작' 시각이다. 사람에게는 마감 시각으로 보여준다.
+# 23:00 KST 봉의 종가는 24:00 KST 의 가격이다.
+def kst_bar(iso):
+    if not iso:
+        return "-"
+    return kst((pd.Timestamp(iso) + pd.Timedelta(hours=1)).isoformat())
+
+
+def et_bar(iso):
+    """봉을 ET 구간으로. 예: 08-27 15:00~16:00 ET"""
+    if not iso:
+        return "-"
+    a = pd.Timestamp(iso).tz_convert(ET)
+    return (a.strftime("%m-%d %H:%M") + "~"
+            + (a + pd.Timedelta(hours=1)).strftime("%H:%M ET"))
+
+
 # ── 세션 · 예고 · 급등락 ─────────────────────────────────────
 # 여기부터는 전부 "알림" 전용이다. state 의 status/entry/peak 은 건드리지 않는다.
 # 시간외 봉을 매매 판정에 넣으면 5년 CAGR 100.6%→34.1%, MDD -40.8%→-81.5% 로
 # 무너진다는 게 실측이다. 그래서 시간외는 끝까지 "예고" 로만 쓴다.
 MOVE_STEP = 5.0        # 급등락 알림 단계 (%). 5 / 10 / 15 … 마다 한 번씩.
+TICK_STALE_SEC = 20 * 60   # 이보다 묵은 틱은 시세가 멈춘 것으로 본다.
 PRE_LABEL = {
     "PRE_BUY":   ("\U0001F535", "매수 조건 충족"),
     "PRE_ARM":   ("\U0001F7E2", "트레일링 발동선 도달"),
@@ -263,7 +281,7 @@ def render_move(mv, sess):
 
 
 def render_event(ev, state):
-    when = kst(ev["at"]) + " KST   (봉 " + et_label(ev["at"]) + ")"
+    when = kst_bar(ev["at"]) + " KST 마감   (봉 " + et_bar(ev["at"]) + ")"
     k = ev["kind"]
 
     if k == "BUY":
@@ -314,8 +332,9 @@ def render_summary(state):
     close = state["last_close"]
     rsi = state["last_rsi"]
     head = ("📊 SOXL 일일 요약\n"
-            + "기준봉 " + et_label(state["last_bar"]) + "\n\n"
-            + "현재가 $%.2f   RSI(12) %.1f\n" % (close, rsi))
+            + "기준봉 " + kst_bar(state["last_bar"]) + " KST 마감"
+            + "  (" + et_bar(state["last_bar"]) + ")\n\n"
+            + "봉 종가 $%.2f   RSI(12) %.1f\n" % (close, rsi))
 
     if state["status"] == "FLAT":
         return head + ("\n상태: FLAT (미보유)\n"
@@ -329,12 +348,12 @@ def render_summary(state):
             + "평가손익 %+.2f%%\n" % ((close / entry - 1) * 100)
             + "진입후 고점 $%.2f\n\n" % peak)
     if state["status"] == "ARMED":
-        body += "트레일링 스탑 $%.2f   (현재가 대비 %+.1f%%)\n" % (
+        body += "트레일링 스탑 $%.2f   (종가 대비 %+.1f%%)\n" % (
             lv["trail"], (lv["trail"] / close - 1) * 100)
     else:
-        body += "발동선 $%.2f   (현재가 대비 %+.1f%%)\n" % (
+        body += "발동선 $%.2f   (종가 대비 %+.1f%%)\n" % (
             lv["arm"], (lv["arm"] / close - 1) * 100)
-    body += "하드스탑 $%.2f   (현재가 대비 %+.1f%%)" % (
+    body += "하드스탑 $%.2f   (종가 대비 %+.1f%%)" % (
         lv["hard"], (lv["hard"] / close - 1) * 100)
     return head + body
 
@@ -421,14 +440,21 @@ def main():
     price = float(raw["close"].iloc[-1])
     sess = session_of(tick_at)
 
-    rsi_live = S.preview_rsi(hourly.iloc[-1], price)
-    for ev in dedup_previews(state, preview_events(state, price, rsi_live)):
-        messages.append(render_preview(ev, sess, tick_at))
+    # 시세가 멈추는 시간대(ET 20:00~04:00)에는 마지막 봉이 몇 시간씩 남는다.
+    # 그걸 현재가로 취급하면 예고·급등락이 묵은 가격으로 나간다.
+    stale = (now - tick_at).total_seconds() > TICK_STALE_SEC
 
-    hit = move_alert(state, day_move(raw, now), now)
-    if hit:
-        messages.append(render_move(hit, sess))
+    if not stale:
+        rsi_live = S.preview_rsi(hourly.iloc[-1], price)
+        for ev in dedup_previews(state, preview_events(state, price, rsi_live)):
+            messages.append(render_preview(ev, sess, tick_at))
 
+        hit = move_alert(state, day_move(raw, now), now)
+        if hit:
+            messages.append(render_move(hit, sess))
+
+    # 마지막으로 본 시세. 판정에는 안 쓰고 /status·대시보드 표시 전용이다.
+    state["tick"] = {"price": price, "at": tick_at.isoformat(), "sess": sess}
     state["last_run"] = now.isoformat()
     state.pop("last_error", None)
 
@@ -443,8 +469,9 @@ def main():
     for m in messages:
         send(m, args.dry)
 
-    print("상태: %s  신규봉 %d  메시지 %d"
-          % (state["status"], len(fresh), len(messages)))
+    print("상태: %s  신규봉 %d  메시지 %d  틱 %s %.2f%s"
+          % (state["status"], len(fresh), len(messages), sess, price,
+             " (묵음)" if stale else ""))
     return 0
 
 

@@ -7,6 +7,10 @@ compatibility_date = "2026-08-01"
 binding = "STATE"
 id = "67eb473e9a3344b5ace1c11b4eabf280"
 
-# 감시견 — 매 평일 UTC 22:00 (KST 07:00, 미국장 마감 후)
+[vars]
+GH_REPO = "meatson89-web/soxl-signal-bot"
+
+# 15분 트리거 — GitHub Actions 의 check.yml 을 깨운다 (GH 스케줄러는 못 믿는다).
+# 감시견   — 매 평일 UTC 22:00 (KST 07:00, 미국장 마감 후).
 [triggers]
-crons = ["0 22 * * 1-5"]
+crons = ["*/15 14-21 * * 1-5", "0 22 * * 1-5"]

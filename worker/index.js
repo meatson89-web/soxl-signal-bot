@@ -13,6 +13,9 @@ const TRAIL_PCT = 0.03;
 const HARD_PCT = 0.30;
 const RSI_TH = 25;
 
+// 감시견 cron. 나머지 cron 은 전부 GitHub Actions 를 깨우는 용도다.
+const WATCHDOG_CRON = "0 22 * * 1-5";
+
 // ── KV ────────────────────────────────────────────────────────
 async function getState(env) {
   return (await env.STATE.get("state", "json")) || {
@@ -47,6 +50,21 @@ const kst = (iso) => {
     hour: "2-digit", minute: "2-digit",
   }).replace("T", " ");
 };
+// 봉 인덱스는 봉의 '시작' 시각이다. 표시는 마감 시각(+1h)으로 한다.
+const barEnd = (iso) => (iso == null ? null : new Date(new Date(iso).getTime() + 3600e3));
+const kstBar = (iso) => (iso == null ? "-" : kst(barEnd(iso)));
+const barAge = (iso) => {
+  if (iso == null) return "";
+  const h = (Date.now() - barEnd(iso).getTime()) / 3600e3;
+  if (h < 1.6) return "";
+  return h < 48 ? `  (${Math.round(h)}시간 전)` : `  (${Math.round(h / 24)}일 전)`;
+};
+const tickLabel = (t) => {
+  const m = (Date.now() - new Date(t.at).getTime()) / 60000;
+  if (m <= 20) return `${t.sess} · ${kst(t.at)} KST`;
+  const ago = m < 90 ? `${Math.round(m)}분 전` : `${Math.round(m / 60)}시간 전`;
+  return `장 종료 · ${kst(t.at)} KST (${ago})`;
+};
 const money = (v) => (v == null ? "-" : "$" + Number(v).toFixed(2));
 const pct = (v) => (v == null ? "-" : (v >= 0 ? "+" : "") + (v * 100).toFixed(1) + "%");
 
@@ -54,8 +72,12 @@ function statusText(s) {
   const lv = levels(s);
   const c = s.last_close;
   let out = "SOXL 상태\n";
-  out += `기준봉 ${kst(s.last_bar)} KST\n`;
-  out += `현재가 ${money(c)}   RSI(12) ${s.last_rsi == null ? "-" : s.last_rsi.toFixed(1)}\n\n`;
+  if (s.tick) {
+    out += `현재가 ${money(s.tick.price)}   ${tickLabel(s.tick)}\n`;
+  }
+  out += `기준봉 ${kstBar(s.last_bar)} KST 마감${barAge(s.last_bar)}\n`;
+  out += `봉 종가 ${money(c)}   RSI(12) ${s.last_rsi == null ? "-" : s.last_rsi.toFixed(1)}\n`;
+  out += `(매매 판정은 정규장 1시간봉 종가로만 합니다)\n\n`;
 
   if (s.status === "FLAT") {
     out += "상태: FLAT (미보유)\n";
@@ -69,11 +91,11 @@ function statusText(s) {
   out += `평가손익 ${pct(c / s.entry - 1)}\n`;
   out += `진입후 고점 ${money(s.peak)}\n\n`;
   if (s.status === "ARMED") {
-    out += `트레일링 스탑 ${money(lv.trail)}  (현재가 대비 ${pct(lv.trail / c - 1)})\n`;
+    out += `트레일링 스탑 ${money(lv.trail)}  (종가 대비 ${pct(lv.trail / c - 1)})\n`;
   } else {
-    out += `발동선 ${money(lv.arm)}  (현재가 대비 ${pct(lv.arm / c - 1)})\n`;
+    out += `발동선 ${money(lv.arm)}  (종가 대비 ${pct(lv.arm / c - 1)})\n`;
   }
-  out += `하드스탑 ${money(lv.hard)}  (현재가 대비 ${pct(lv.hard / c - 1)})`;
+  out += `하드스탑 ${money(lv.hard)}  (종가 대비 ${pct(lv.hard / c - 1)})`;
   return out;
 }
 
@@ -190,11 +212,11 @@ function dashboard(s, bars) {
     rows.push(["평가손익", pct(c / s.entry - 1), ""]);
     rows.push(["진입후 고점", money(s.peak), ""]);
     if (s.status === "ARMED") {
-      rows.push(["트레일링 스탑", money(lv.trail), `현재가 대비 ${pct(lv.trail / c - 1)}`]);
+      rows.push(["트레일링 스탑", money(lv.trail), `종가 대비 ${pct(lv.trail / c - 1)}`]);
     } else {
-      rows.push(["발동선 (+10%)", money(lv.arm), `현재가 대비 ${pct(lv.arm / c - 1)}`]);
+      rows.push(["발동선 (+10%)", money(lv.arm), `종가 대비 ${pct(lv.arm / c - 1)}`]);
     }
-    rows.push(["하드스탑 (-30%)", money(lv.hard), `현재가 대비 ${pct(lv.hard / c - 1)}`]);
+    rows.push(["하드스탑 (-30%)", money(lv.hard), `종가 대비 ${pct(lv.hard / c - 1)}`]);
   }
 
   const KIND = {
@@ -205,7 +227,7 @@ function dashboard(s, bars) {
     const [icon, name] = KIND[e.kind] || ["•", e.kind];
     const ret = e.ret == null ? "" : ` (${pct(e.ret)})`;
     return `<li><span>${icon}</span><b>${name}</b>${ret}
-      <time>${kst(e.at)} · ${money(e.price)}</time></li>`;
+      <time>${kstBar(e.at)} · ${money(e.price)}</time></li>`;
   }).join("") || "<li class=empty>아직 기록된 신호가 없습니다.</li>";
 
   const stale = s.last_run
@@ -252,9 +274,12 @@ function dashboard(s, bars) {
   <div class="card">
     <div class="top">
       <span class="badge">${s.status}</span>
-      <span class="price">${money(c)}</span>
+      <span class="price">${money(s.tick ? s.tick.price : c)}</span>
       <span class="rsi">RSI(12) ${s.last_rsi == null ? "-" : s.last_rsi.toFixed(1)}</span>
     </div>
+    <div class="rsi" style="margin-top:8px">
+      ${s.tick ? `현재가 · ${tickLabel(s.tick)}` : "확정 봉 종가"}
+      &nbsp;·&nbsp; 기준봉 ${kstBar(s.last_bar)} KST 마감 ${money(c)}${barAge(s.last_bar)}</div>
   </div>
   <div class="card">
     <h2>트리거까지 거리</h2>
@@ -278,6 +303,28 @@ function dashboard(s, bars) {
   <div class="card"><h2>최근 신호</h2><ul>${recent}</ul></div>
   <footer>마지막 갱신 ${kst(s.last_run)} KST</footer>
 </div>`;
+}
+
+// ── GitHub Actions 깨우기 ─────────────────────────────────────
+// GitHub 의 예약 실행(schedule)은 대부분 그냥 건너뛴다.
+// 실측: 2026-08-26~27 이틀간 기대 ~64회 중 1회만 실행됐다.
+// 그래서 15분 트리거는 Cloudflare 가 잡고, 여기서 workflow_dispatch 로 깨운다.
+async function dispatchCheck(env) {
+  if (!env.GH_TOKEN || !env.GH_REPO) return;
+  const r = await fetch(
+    `https://api.github.com/repos/${env.GH_REPO}/actions/workflows/check.yml/dispatches`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${env.GH_TOKEN}`,
+        accept: "application/vnd.github+json",
+        "content-type": "application/json",
+        "user-agent": "soxl-bot",
+      },
+      body: JSON.stringify({ ref: "main" }),
+    },
+  );
+  if (!r.ok) console.log("dispatch 실패 " + r.status + " " + (await r.text()));
 }
 
 // ── 라우팅 ────────────────────────────────────────────────────
@@ -342,6 +389,10 @@ export default {
   // 감시견 — GitHub Actions 가 죽어도 이건 Cloudflare 가 돌린다.
   // 평일 UTC 22:00 (KST 07:00). 미국장 마감 후라 그날 결과가 확정돼 있다.
   async scheduled(event, env, ctx) {
+    if (event.cron !== WATCHDOG_CRON) {
+      ctx.waitUntil(dispatchCheck(env));
+      return;
+    }
     const s = await getState(env);
     const { text, patch } = watchdog(s, new Date());
     if (patch) await putState(env, { ...s, ...patch });

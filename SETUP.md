@@ -11,7 +11,8 @@ Cloudflare Worker Secrets        GitHub Secrets
 ├ TELEGRAM_CHAT_ID               └ BOT_SYNC_SECRET
 ├ TG_WEBHOOK_SECRET
 ├ DASH_PATH                      (선택) TWELVEDATA_API_KEY
-└ BOT_SYNC_SECRET
+├ BOT_SYNC_SECRET
+└ GH_TOKEN   ← Actions 를 깨우는 용도
 ```
 
 GitHub 에는 **텔레그램 토큰도 Cloudflare API 토큰도 두지 않는다.**
@@ -38,8 +39,14 @@ npx wrangler secret put TELEGRAM_BOT_TOKEN
 npx wrangler secret put TG_WEBHOOK_SECRET  # 랜덤 32자
 npx wrangler secret put DASH_PATH          # 랜덤 24자 (대시보드 비밀 경로)
 npx wrangler secret put BOT_SYNC_SECRET    # 랜덤 32자
+npx wrangler secret put GH_TOKEN           # GitHub fine-grained PAT
 npx wrangler deploy
 ```
+
+`GH_TOKEN` 은 이 저장소만 대상으로 한 fine-grained PAT 이고 권한은
+**Actions: Read and write** 하나면 된다. Worker 의 15분 cron 이 이걸로
+`check.yml` 을 깨운다 (GitHub 자체 `schedule` 은 거의 안 뜬다).
+`wrangler.toml` 의 `GH_REPO` 도 저장소 이름과 맞는지 확인할 것.
 
 ## 3. 텔레그램 웹훅
 
@@ -83,7 +90,7 @@ gh run watch
 
 - [ ] 텔레그램에 `/status` → 즉시 답한다
 - [ ] `https://<WORKER_URL>/d/<DASH_PATH>` → 대시보드가 열린다
-- [ ] Actions 탭 스케줄 실행이 초록불
+- [ ] Actions 탭에 15분마다 `workflow_dispatch` 실행이 초록불
 - [ ] 장 마감 후(KST 새벽 5~6시) 일일 요약이 온다
 
 **일일 요약이 이틀 이상 안 오면 봇이 죽은 것이다.** Actions 탭을 확인할 것.
