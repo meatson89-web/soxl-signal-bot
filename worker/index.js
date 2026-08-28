@@ -16,6 +16,21 @@ const RSI_TH = 25;
 // 감시견 cron. 나머지 cron 은 전부 GitHub Actions 를 깨우는 용도다.
 const WATCHDOG_CRON = "0 22 * * 1-5";
 
+// 깨울 시간대를 cron 표현식으로 자르지 않는다. 서머타임 때문에 두 줄이
+// 필요해지고, 표현식이 안 먹어도 아무 소리 없이 조용해질 뿐이다
+// (실제로 '*/15 8-23 * * 1-5' 가 그렇게 죽어 있었다).
+// cron 은 '*/15 * * * *' 하나로 두고 창은 여기서 판단한다 — 테스트가 된다.
+const ET_FMT = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/New_York", hour12: false, weekday: "short", hour: "2-digit",
+});
+
+export function inMarketWindow(d) {
+  const p = Object.fromEntries(ET_FMT.formatToParts(d).map((x) => [x.type, x.value]));
+  if (p.weekday === "Sat" || p.weekday === "Sun") return false;
+  const h = Number(p.hour) % 24;
+  return h >= 4 && h < 20;          // 프리장 시작 ~ 애프터장 종료
+}
+
 // ── KV ────────────────────────────────────────────────────────
 async function getState(env) {
   return (await env.STATE.get("state", "json")) || {
@@ -309,8 +324,18 @@ function dashboard(s, bars) {
 // GitHub 의 예약 실행(schedule)은 대부분 그냥 건너뛴다.
 // 실측: 2026-08-26~27 이틀간 기대 ~64회 중 1회만 실행됐다.
 // 그래서 15분 트리거는 Cloudflare 가 잡고, 여기서 workflow_dispatch 로 깨운다.
-async function dispatchCheck(env) {
-  if (!env.GH_TOKEN || !env.GH_REPO) return;
+async function dispatchCheck(env, cron) {
+  const rec = { at: new Date().toISOString(), cron };
+  if (!inMarketWindow(new Date())) {
+    rec.result = "창 밖 (평일 ET 04:00~20:00 만 깨운다)";
+    await env.STATE.put("cron", JSON.stringify(rec));
+    return;
+  }
+  if (!env.GH_TOKEN || !env.GH_REPO) {
+    rec.result = "GH_TOKEN / GH_REPO 없음";
+    await env.STATE.put("cron", JSON.stringify(rec));
+    return;
+  }
   const r = await fetch(
     `https://api.github.com/repos/${env.GH_REPO}/actions/workflows/check.yml/dispatches`,
     {
@@ -324,7 +349,9 @@ async function dispatchCheck(env) {
       body: JSON.stringify({ ref: "main" }),
     },
   );
-  if (!r.ok) console.log("dispatch 실패 " + r.status + " " + (await r.text()));
+  rec.result = r.ok ? "ok" : r.status + " " + (await r.text()).slice(0, 200);
+  await env.STATE.put("cron", JSON.stringify(rec));
+  if (!r.ok) console.log("dispatch 실패 " + rec.result);
 }
 
 // ── 라우팅 ────────────────────────────────────────────────────
@@ -390,7 +417,7 @@ export default {
   // 평일 UTC 22:00 (KST 07:00). 미국장 마감 후라 그날 결과가 확정돼 있다.
   async scheduled(event, env, ctx) {
     if (event.cron !== WATCHDOG_CRON) {
-      ctx.waitUntil(dispatchCheck(env));
+      ctx.waitUntil(dispatchCheck(env, event.cron));
       return;
     }
     const s = await getState(env);

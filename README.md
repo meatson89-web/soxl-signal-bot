@@ -43,6 +43,17 @@ $121.35 로 멈춰 트레일링 스탑이 $117.71 (정상값 $119.47) 로 어긋
 그래서 15분 트리거는 Cloudflare cron 이 잡고, Worker 가 `workflow_dispatch`
 로 Actions 를 깨운다. `check.yml` 의 `schedule` 은 예비로 남겨둔다.
 
+**Cloudflare cron 에 시간 범위를 넣지 말 것.** `*/15 8-23 * * 1-5` 는 배포는
+성공했다고 찍히면서 한 번도 안 뛰었다 (45분간 0회, 로그도 에러도 없음).
+cron 은 `*/15 * * * *` 한 줄로 두고, 깨울 창은 `inMarketWindow()` 가 판단한다.
+JS 라서 서머타임까지 로컬에서 테스트할 수 있다.
+발화 결과는 KV 의 `cron` 키에 매번 남으므로 이렇게 확인한다:
+
+```bash
+npx wrangler kv key get cron --namespace-id=<KV_ID> --remote
+# {"at":"…","cron":"*/15 * * * *","result":"ok"}
+```
+
 `bot.py` 는 **멱등**하다. "지금 몇 시냐"가 아니라 "KV 의 `last_bar` 이후
 확정된 봉이 있냐"로 판단하므로, cron 이 늦거나 건너뛰어도 다음 실행이
 밀린 봉을 전부 처리한다.
