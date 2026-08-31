@@ -11,7 +11,8 @@ id = "67eb473e9a3344b5ace1c11b4eabf280"
 GH_REPO = "meatson89-web/soxl-signal-bot"
 
 # 15분 트리거 — GitHub Actions 의 check.yml 을 깨운다 (GH 스케줄러는 못 믿는다).
-#   창을 자르는 건 index.js 의 inMarketWindow() 다. 시간 범위를 cron 에 넣으면
+#   창을 자르는 건 index.js 의 inMarketWindow() 다 (금 20:00 ET ~ 일 20:00 ET 만
+#   쉰다 — Blue Ocean ATS 오버나잇까지 포함). 시간 범위를 cron 에 넣으면
 #   서머타임 때문에 두 줄이 되고, 안 먹어도 조용해서 못 알아챈다.
 # 감시견   — 매 평일 UTC 22:00 (KST 07:00, 미국장 마감 후).
 [triggers]

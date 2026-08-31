@@ -24,11 +24,15 @@ const ET_FMT = new Intl.DateTimeFormat("en-CA", {
   timeZone: "America/New_York", hour12: false, weekday: "short", hour: "2-digit",
 });
 
+// Blue Ocean ATS 오버나잇(ET 20:00~04:00, 일~목 밤)까지 깨운다. 닫히는 건
+// 금요일 애프터장 종료(20:00)부터 일요일 오버나잇 시작(20:00) 까지뿐이다.
 export function inMarketWindow(d) {
   const p = Object.fromEntries(ET_FMT.formatToParts(d).map((x) => [x.type, x.value]));
-  if (p.weekday === "Sat" || p.weekday === "Sun") return false;
   const h = Number(p.hour) % 24;
-  return h >= 4 && h < 20;          // 프리장 시작 ~ 애프터장 종료
+  if (p.weekday === "Sat") return false;
+  if (p.weekday === "Fri" && h >= 20) return false;
+  if (p.weekday === "Sun" && h < 20) return false;
+  return true;
 }
 
 // ── KV ────────────────────────────────────────────────────────
@@ -327,7 +331,7 @@ function dashboard(s, bars) {
 async function dispatchCheck(env, cron) {
   const rec = { at: new Date().toISOString(), cron };
   if (!inMarketWindow(new Date())) {
-    rec.result = "창 밖 (평일 ET 04:00~20:00 만 깨운다)";
+    rec.result = "창 밖 (금 20:00 ET ~ 일 20:00 ET 주말만 쉰다)";
     await env.STATE.put("cron", JSON.stringify(rec));
     return;
   }

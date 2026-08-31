@@ -37,6 +37,8 @@ jobs:
           WORKER_URL: ${{ secrets.WORKER_URL }}
           BOT_SYNC_SECRET: ${{ secrets.BOT_SYNC_SECRET }}
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
         run: python bot.py
 
       - name: Commit signal log

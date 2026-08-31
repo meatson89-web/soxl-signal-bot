@@ -79,6 +79,28 @@ def fetch_twelvedata(api_key):
     return df.set_index("datetime")[["open", "high", "low", "close"]].sort_index()
 
 
+def fetch_alpaca_overnight():
+    """Blue Ocean ATS 오버나잇(ET 20:00~04:00) 실시간 체결가. 예고 전용 —
+    Yahoo 가 그 구간엔 데이터를 아예 안 주므로 이걸로만 보충한다."""
+    key = os.environ.get("ALPACA_API_KEY")
+    secret = os.environ.get("ALPACA_SECRET_KEY")
+    if not key or not secret:
+        return None
+    try:
+        r = requests.get(
+            f"https://data.alpaca.markets/v2/stocks/{TICKER}/trades/latest",
+            params={"feed": "overnight"},
+            headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
+            timeout=15,
+        )
+        r.raise_for_status()
+        t = r.json()["trade"]
+        return float(t["p"]), pd.Timestamp(t["t"])
+    except Exception as exc:
+        print("Alpaca 오버나잇 시세 실패: " + str(exc), file=sys.stderr)
+        return None
+
+
 def fetch_bars():
     errors = []
     sources = [("yahoo", fetch_yahoo)]
@@ -196,6 +218,13 @@ def session_of(ts):
     if 16 * 60 <= hm < 20 * 60:
         return "애프터장"
     return "야간"
+
+
+def in_overnight_window(ts_utc):
+    """ET 20:00~04:00 (Blue Ocean ATS 오버나잇) 인가. 요일 경계는 안 따진다 —
+    주말·목요일밤 이후에 불러도 Alpaca 응답 자체가 묵어서 stale 재판정으로 걸러진다."""
+    h = ts_utc.tz_convert(ET).hour
+    return h >= 20 or h < 4
 
 
 def preview_events(state, price, rsi_live):
@@ -438,11 +467,20 @@ def main():
     # 어느 쪽도 status/entry/peak 을 건드리지 않으므로 백테스트는 그대로다.
     tick_at = raw.index[-1]
     price = float(raw["close"].iloc[-1])
-    sess = session_of(tick_at)
 
     # 시세가 멈추는 시간대(ET 20:00~04:00)에는 마지막 봉이 몇 시간씩 남는다.
     # 그걸 현재가로 취급하면 예고·급등락이 묵은 가격으로 나간다.
     stale = (now - tick_at).total_seconds() > TICK_STALE_SEC
+
+    # Yahoo 가 안 주는 그 구간은 Alpaca 오버나잇 피드로 보충한다 (ALPACA_API_KEY
+    # 미설정이면 조용히 원래대로 stale 처리 — 필수 소스가 아니다).
+    if stale and in_overnight_window(now):
+        alt = fetch_alpaca_overnight()
+        if alt is not None:
+            price, tick_at = alt
+            stale = (now - tick_at).total_seconds() > TICK_STALE_SEC
+
+    sess = session_of(tick_at)
 
     if not stale:
         rsi_live = S.preview_rsi(hourly.iloc[-1], price)
