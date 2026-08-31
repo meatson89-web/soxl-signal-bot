@@ -432,6 +432,15 @@ function etDate(d) {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(d);
 }
 
+/** 뉴욕 기준 토·일요일인가. 크론 트리거가 평일만 도록 돼 있어도, 트리거 설정이
+ *  드리프트하는 경우를 대비해 함수 안에서도 한 번 더 막는다. */
+function isWeekendET(d) {
+  const wd = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", weekday: "short",
+  }).format(d);
+  return wd === "Sat" || wd === "Sun";
+}
+
 /**
  * 하루 한 번 판정. 셋 중 하나다.
  *   1) 갱신이 12시간 넘게 끊김        → 🚨 경보 (하루 1회만)
@@ -441,6 +450,7 @@ function etDate(d) {
  */
 export function watchdog(s, now) {
   if (!s.last_run) return { text: null, patch: null };
+  if (isWeekendET(now)) return { text: null, patch: null };
 
   const today = etDate(now);
   const hours = (now - new Date(s.last_run)) / 3600e3;

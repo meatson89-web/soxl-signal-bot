@@ -61,5 +61,14 @@ const dedup = first.text !== null && second.text === null;
 if (!dedup) failed++;
 console.log(`${dedup ? "PASS" : "FAIL"}  같은 날 재실행 시 중복 발송 없음`);
 
+// 주말엔 갱신이 며칠씩 끊겨 있어도 조용해야 한다 (2026-08-30 은 일요일).
+const sunday = new Date("2026-08-30T22:00:00Z");
+const weekendState = { ...base,
+  last_run: new Date(sunday - 60 * 3600e3).toISOString(),
+  last_bar: "2026-08-28T19:00:00+00:00" };
+const weekendQuiet = watchdog(weekendState, sunday).text === null;
+if (!weekendQuiet) failed++;
+console.log(`${weekendQuiet ? "PASS" : "FAIL"}  주말(일요일) · 60시간 끊김이어도 조용`);
+
 console.log(failed ? `\n${failed}건 실패` : "\n전부 통과");
 process.exit(failed ? 1 : 0);
