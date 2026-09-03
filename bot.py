@@ -123,26 +123,6 @@ def fetch_alpaca_quote(feed=None):
         return None
 
 
-def diag_alpaca():
-    """[진단용 임시] 페이퍼 계좌 포지션과 스냅샷이 오버나잇에 갱신되는지 확인.
-    마켓데이터 quotes/trades 가 얼어 있어도 Alpaca 내부 평가가격은 살아 있는지 본다."""
-    key = os.environ.get("ALPACA_API_KEY")
-    secret = os.environ.get("ALPACA_SECRET_KEY")
-    if not key or not secret:
-        return
-    h = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
-    for label, url in (
-        ("포지션", f"https://paper-api.alpaca.markets/v2/positions/{TICKER}"),
-        ("스냅샷", f"https://data.alpaca.markets/v2/stocks/{TICKER}/snapshot"),
-    ):
-        try:
-            r = requests.get(url, headers=h, timeout=15)
-            print("[진단] " + label + " " + str(r.status_code) + " " + r.text[:900],
-                  file=sys.stderr)
-        except Exception as exc:
-            print("[진단] " + label + " 실패: " + str(exc), file=sys.stderr)
-
-
 def fetch_bars():
     errors = []
     sources = [("yahoo", fetch_yahoo)]
@@ -526,28 +506,27 @@ def main():
     # 여기서 정한 값은 표시(/status·대시보드·예고)에만 쓰고 status/entry/peak
     # 은 건드리지 않으므로 백테스트는 그대로다.
     #
-    # 기본 소스는 Alpaca 실시간 체결가다. Yahoo 5분봉(raw)은 판정용 확정봉을
-    # 만드는 데는 쓰지만, 예외 없이 최근 며칠치가 통째로 빠진 응답을 돌려줄
-    # 때가 있어(2026-09 초 실측 — 확정봉은 정상 갱신되는데 현재가만 수십 시간
-    # 전 값으로 멈춰 있었다) 표시용 "현재가"의 기본 소스로는 못 믿는다.
-    # Alpaca 키가 없거나 요청이 실패하면 Yahoo tick 으로 되돌아간다(예전 동작).
-    src = "yahoo"
-    tick_at = raw.index[-1]
-    price = float(raw["close"].iloc[-1])
-
-    diag_alpaca()   # [진단용 임시] 확인 끝나면 이 줄과 diag_alpaca() 정의를 지운다
-    alt = fetch_alpaca_quote("overnight" if in_overnight_window(now) else None)
-    if alt is not None:
-        price, tick_at = alt
-        src = "alpaca"
-
-    # 방금 고른 틱이 이미 저장돼 있던 틱보다 더 옛날이면(소스 쪽 일시적 결함으로
-    # 데이터가 되돌아간 것) 화면에 내보내지 않고 기존 값을 그대로 유지한다.
+    # 어느 소스도 "믿지" 않는다. 후보를 전부 모아 시각이 가장 최신인 것을 고른다.
+    # 소스를 우선순위로 고르면 그 소스가 얼어붙었을 때 신선한 값을 덮어써 버린다 —
+    # 2026-09 실측: overnight 피드가 Aug 31 세션 경계값(114.56)에 고정돼 있었는데
+    # 실제가는 104~106 이었고, 그걸 우선하는 코드가 9% 틀린 값을 계속 표시했다.
+    # 시각으로만 판정하면 얼어붙은 소스는 자동으로 밀려난다.
+    #
+    # 직전에 저장해둔 틱도 후보에 넣는다. 이번 실행에서 받은 게 전부 그보다
+    # 옛날이면(소스 결함으로 데이터가 되돌아간 경우) 기존 값이 그대로 유지된다.
+    cands = [("yahoo", float(raw["close"].iloc[-1]), raw.index[-1])]
+    for feed in [None] + (["overnight"] if in_overnight_window(now) else []):
+        got = fetch_alpaca_quote(feed)
+        if got is not None:
+            cands.append(("alpaca" + ("-" + feed if feed else ""), got[0], got[1]))
     prev_tick = state.get("tick")
-    if prev_tick and pd.Timestamp(prev_tick["at"]) > tick_at:
-        price = prev_tick["price"]
-        tick_at = pd.Timestamp(prev_tick["at"])
-        src = prev_tick.get("src", src)
+    if prev_tick:
+        cands.append((prev_tick.get("src", "yahoo"), float(prev_tick["price"]),
+                      pd.Timestamp(prev_tick["at"])))
+
+    src, price, tick_at = max(cands, key=lambda c: c[2])
+    print("틱 후보: " + " | ".join(
+        "%s %.2f @%s" % (s, p, t.isoformat()) for s, p, t in cands), file=sys.stderr)
 
     # 시세가 멈추는 시간대에는 마지막 틱이 몇 시간씩 남을 수 있다.
     # 그걸 현재가로 취급하면 예고·급등락이 묵은 가격으로 나간다.
