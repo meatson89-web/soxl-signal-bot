@@ -93,6 +93,24 @@ const tickLabel = (t) => {
 const money = (v) => (v == null ? "-" : "$" + Number(v).toFixed(2));
 const pct = (v) => (v == null ? "-" : (v >= 0 ? "+" : "") + (v * 100).toFixed(1) + "%");
 
+// 현재가가 왜 묵었는지 한 줄로 밝힌다. "5시간 전"만 떠 있으면 정상인지
+// 고장인지 구분이 안 된다. 오버나잇(ET 20:00~04:00)에는 이 계정이 쓸 수 있는
+// 실시간 소스가 없어서 애프터장 마지막 값이 그대로 남는 게 정상 동작이다.
+function feedNote(t) {
+  if ((Date.now() - new Date(t.at).getTime()) / 60000 <= 20) return "";
+  const now = new Date();
+  if (!inMarketWindow(now)) {
+    return "   ※ 주말 휴장입니다. 일요일 ET 20:00 에 재개됩니다.\n";
+  }
+  const p = Object.fromEntries(ET_FMT.formatToParts(now).map((x) => [x.type, x.value]));
+  const h = Number(p.hour) % 24;
+  if (h >= 20 || h < 4) {
+    return "   ※ 오버나잇(ET 20:00~04:00)엔 실시간 시세 소스가 없습니다.\n"
+      + "      ET 04:00 프리장부터 갱신됩니다. (매매 판정엔 영향 없음)\n";
+  }
+  return "   ※ 20분 넘게 갱신이 없습니다. 봇 상태를 확인하세요.\n";
+}
+
 // /status 는 세 구획으로 나눈다: 실시간 현재가(참고용) → 확정봉(매매 판정의
 // 유일한 근거) → 포지션. 셋을 한 문단에 섞으면 "현재가"와 "판정 기준 종가"가
 // 다른 숫자라는 게 안 보여서 혼동이 생긴다.
@@ -102,8 +120,14 @@ function statusText(s) {
   const DIV = "─────────────\n";
   let out = "📊 SOXL 상태\n" + DIV;
 
+  const liveRsi = s.tick ? s.tick.rsi : null;
   if (s.tick) {
-    out += `🔴 실시간 현재가 ${money(s.tick.price)}\n   ${tickLabel(s.tick)}\n\n`;
+    out += `🔴 실시간 현재가 ${money(s.tick.price)}\n`;
+    if (liveRsi != null) {
+      out += `   예상 RSI(12) ${liveRsi.toFixed(1)}`
+        + (liveRsi <= RSI_TH ? "  ▼ 진입 조건 충족" : "") + "\n";
+    }
+    out += `   ${tickLabel(s.tick)}\n` + feedNote(s.tick) + "\n";
   }
   out += "📐 확정봉 (매매 판정 기준)\n";
   out += `   ${kstBar(s.last_bar)} KST 마감${barAge(s.last_bar)}\n`;
@@ -112,8 +136,12 @@ function statusText(s) {
 
   if (s.status === "FLAT") {
     out += "포지션: FLAT (미보유)\n";
-    if (s.last_rsi != null) {
-      out += `진입 조건 RSI ≤ ${RSI_TH} 까지 ${(s.last_rsi - RSI_TH).toFixed(1)}p 남음`;
+    // 진입은 실시간 RSI 로 발동하므로 거리도 실시간 값으로 잰다.
+    const r = liveRsi != null ? liveRsi : s.last_rsi;
+    if (r != null) {
+      out += r <= RSI_TH
+        ? `진입 조건 RSI ≤ ${RSI_TH} 충족 중  (${(RSI_TH - r).toFixed(1)}p 아래)`
+        : `진입 조건 RSI ≤ ${RSI_TH} 까지 ${(r - RSI_TH).toFixed(1)}p 남음`;
     }
     return out;
   }

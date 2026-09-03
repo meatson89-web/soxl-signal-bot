@@ -533,9 +533,12 @@ def main():
     stale = (now - tick_at).total_seconds() > TICK_STALE_SEC
     sess = session_of(tick_at)
 
-    if not stale:
-        rsi_live = S.preview_rsi(hourly.iloc[-1], price)
+    # 예상 RSI — 지금 현재가가 다음 정규장 봉 종가라면 RSI 가 얼마인가.
+    # 진입 판정(아래)과 /status 표시에 함께 쓴다. 틱이 묵었으면 이 값도 같이
+    # 묵은 것이므로, 표시 쪽에서 틱 나이를 같이 보여준다.
+    rsi_live = S.preview_rsi(hourly.iloc[-1], price)
 
+    if not stale:
         # 실시간 진입 — 정규장 중에는 확정봉을 기다리지 않고 실시간 RSI 로도
         # 매수 신호를 낸다. 장중에 반짝 25 아래로 찍었다가 그 봉 종가에는 다시
         # 올라오는 경우, 예전엔 신호가 아예 안 갔지만 이제는 그 순간 진입으로
@@ -560,7 +563,9 @@ def main():
             messages.append(render_move(hit, sess))
 
     # 마지막으로 본 시세. 판정에는 안 쓰고 /status·대시보드 표시 전용이다.
-    state["tick"] = {"price": price, "at": tick_at.isoformat(), "sess": sess, "src": src}
+    state["tick"] = {"price": price, "at": tick_at.isoformat(), "sess": sess, "src": src,
+                     "rsi": None if rsi_live is None or pd.isna(rsi_live)
+                            else round(float(rsi_live), 2)}
     state["last_run"] = now.isoformat()
     state.pop("last_error", None)
 
