@@ -78,7 +78,10 @@ const barAge = (iso) => {
   if (h < 1.6) return "";
   return h < 48 ? `  (${Math.round(h)}시간 전)` : `  (${Math.round(h / 24)}일 전)`;
 };
-const SRC_LABEL = { alpaca: "Alpaca 실시간", yahoo: "Yahoo(지연 가능)" };
+// "실시간"이라 쓰지 않는다 — 옆에 "(N시간 전)"이 같이 뜰 수 있어서(오버나잇
+// 저유동성 시간대엔 Alpaca 도 마지막 체결 이후 몇 시간이고 새 틱이 안 올 수
+// 있다), 소스 이름만 밝히고 신선도 판단은 나이 표시에 맡긴다.
+const SRC_LABEL = { alpaca: "Alpaca", yahoo: "Yahoo" };
 const tickLabel = (t) => {
   const m = (Date.now() - new Date(t.at).getTime()) / 60000;
   const src = SRC_LABEL[t.src];
