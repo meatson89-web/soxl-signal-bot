@@ -123,6 +123,26 @@ def fetch_alpaca_quote(feed=None):
         return None
 
 
+def diag_alpaca():
+    """[진단용 임시] 페이퍼 계좌 포지션과 스냅샷이 오버나잇에 갱신되는지 확인.
+    마켓데이터 quotes/trades 가 얼어 있어도 Alpaca 내부 평가가격은 살아 있는지 본다."""
+    key = os.environ.get("ALPACA_API_KEY")
+    secret = os.environ.get("ALPACA_SECRET_KEY")
+    if not key or not secret:
+        return
+    h = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
+    for label, url in (
+        ("포지션", f"https://paper-api.alpaca.markets/v2/positions/{TICKER}"),
+        ("스냅샷", f"https://data.alpaca.markets/v2/stocks/{TICKER}/snapshot"),
+    ):
+        try:
+            r = requests.get(url, headers=h, timeout=15)
+            print("[진단] " + label + " " + str(r.status_code) + " " + r.text[:900],
+                  file=sys.stderr)
+        except Exception as exc:
+            print("[진단] " + label + " 실패: " + str(exc), file=sys.stderr)
+
+
 def fetch_bars():
     errors = []
     sources = [("yahoo", fetch_yahoo)]
@@ -515,6 +535,7 @@ def main():
     tick_at = raw.index[-1]
     price = float(raw["close"].iloc[-1])
 
+    diag_alpaca()   # [진단용 임시] 확인 끝나면 이 줄과 diag_alpaca() 정의를 지운다
     alt = fetch_alpaca_quote("overnight" if in_overnight_window(now) else None)
     if alt is not None:
         price, tick_at = alt
