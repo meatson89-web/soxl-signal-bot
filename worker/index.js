@@ -78,34 +78,43 @@ const barAge = (iso) => {
   if (h < 1.6) return "";
   return h < 48 ? `  (${Math.round(h)}시간 전)` : `  (${Math.round(h / 24)}일 전)`;
 };
+const SRC_LABEL = { alpaca: "Alpaca 실시간", yahoo: "Yahoo(지연 가능)" };
 const tickLabel = (t) => {
   const m = (Date.now() - new Date(t.at).getTime()) / 60000;
-  if (m <= 20) return `${t.sess} · ${kst(t.at)} KST`;
-  const ago = m < 90 ? `${Math.round(m)}분 전` : `${Math.round(m / 60)}시간 전`;
-  return `장 종료 · ${kst(t.at)} KST (${ago})`;
+  const src = SRC_LABEL[t.src];
+  const when = m <= 20
+    ? `${t.sess} · ${kst(t.at)} KST`
+    : `장 종료 · ${kst(t.at)} KST (${m < 90 ? `${Math.round(m)}분 전` : `${Math.round(m / 60)}시간 전`})`;
+  return src ? `${when}  [${src}]` : when;
 };
 const money = (v) => (v == null ? "-" : "$" + Number(v).toFixed(2));
 const pct = (v) => (v == null ? "-" : (v >= 0 ? "+" : "") + (v * 100).toFixed(1) + "%");
 
+// /status 는 세 구획으로 나눈다: 실시간 현재가(참고용) → 확정봉(매매 판정의
+// 유일한 근거) → 포지션. 셋을 한 문단에 섞으면 "현재가"와 "판정 기준 종가"가
+// 다른 숫자라는 게 안 보여서 혼동이 생긴다.
 function statusText(s) {
   const lv = levels(s);
   const c = s.last_close;
-  let out = "SOXL 상태\n";
+  const DIV = "─────────────\n";
+  let out = "📊 SOXL 상태\n" + DIV;
+
   if (s.tick) {
-    out += `현재가 ${money(s.tick.price)}   ${tickLabel(s.tick)}\n`;
+    out += `🔴 실시간 현재가 ${money(s.tick.price)}\n   ${tickLabel(s.tick)}\n\n`;
   }
-  out += `기준봉 ${kstBar(s.last_bar)} KST 마감${barAge(s.last_bar)}\n`;
-  out += `봉 종가 ${money(c)}   RSI(12) ${s.last_rsi == null ? "-" : s.last_rsi.toFixed(1)}\n`;
-  out += `(매매 판정은 정규장 1시간봉 종가로만 합니다)\n\n`;
+  out += "📐 확정봉 (매매 판정 기준)\n";
+  out += `   ${kstBar(s.last_bar)} KST 마감${barAge(s.last_bar)}\n`;
+  out += `   종가 ${money(c)}   RSI(12) ${s.last_rsi == null ? "-" : s.last_rsi.toFixed(1)}\n`;
+  out += DIV;
 
   if (s.status === "FLAT") {
-    out += "상태: FLAT (미보유)\n";
+    out += "포지션: FLAT (미보유)\n";
     if (s.last_rsi != null) {
       out += `진입 조건 RSI ≤ ${RSI_TH} 까지 ${(s.last_rsi - RSI_TH).toFixed(1)}p 남음`;
     }
     return out;
   }
-  out += `상태: ${s.status === "ARMED" ? "ARMED (발동 후)" : "HOLD (발동 전)"}\n`;
+  out += `포지션: ${s.status === "ARMED" ? "ARMED (발동 후)" : "HOLD (발동 전)"}\n`;
   out += `진입 ${money(s.entry)}  (${kst(s.entry_time)} KST)\n`;
   out += `평가손익 ${pct(c / s.entry - 1)}\n`;
   out += `진입후 고점 ${money(s.peak)}\n\n`;

@@ -79,9 +79,13 @@ def fetch_twelvedata(api_key):
     return df.set_index("datetime")[["open", "high", "low", "close"]].sort_index()
 
 
-def fetch_alpaca_overnight():
-    """Blue Ocean ATS 오버나잇(ET 20:00~04:00) 실시간 체결가. 예고 전용 —
-    Yahoo 가 그 구간엔 데이터를 아예 안 주므로 이걸로만 보충한다."""
+def fetch_alpaca_quote(feed=None):
+    """Alpaca 최신 체결가. "현재가" 표시의 기본 소스다 (판정에는 안 쓴다).
+
+    feed=None  → 기본(정규장·프리장·애프터장) 피드.
+    feed="overnight" → Blue Ocean ATS 오버나잇(ET 20:00~04:00) 피드.
+      Yahoo 는 이 구간에 데이터를 아예 안 주므로 이때는 Alpaca 가 유일한 소스다.
+    """
     key = os.environ.get("ALPACA_API_KEY")
     secret = os.environ.get("ALPACA_SECRET_KEY")
     if not key or not secret:
@@ -89,7 +93,7 @@ def fetch_alpaca_overnight():
     try:
         r = requests.get(
             f"https://data.alpaca.markets/v2/stocks/{TICKER}/trades/latest",
-            params={"feed": "overnight"},
+            params={"feed": feed} if feed else {},
             headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
             timeout=15,
         )
@@ -97,7 +101,7 @@ def fetch_alpaca_overnight():
         t = r.json()["trade"]
         return float(t["p"]), pd.Timestamp(t["t"])
     except Exception as exc:
-        print("Alpaca 오버나잇 시세 실패: " + str(exc), file=sys.stderr)
+        print("Alpaca " + (feed or "실시간") + " 시세 실패: " + str(exc), file=sys.stderr)
         return None
 
 
@@ -310,18 +314,35 @@ def render_move(mv, sess):
 
 
 def render_event(ev, state):
-    when = kst_bar(ev["at"]) + " KST 마감   (봉 " + et_bar(ev["at"]) + ")"
+    # BUY(live=True) 는 ev["at"] 이 봉 시작 시각이 아니라 실제 틱 시각이므로
+    # kst_bar/et_bar (+1h 봉마감 보정) 를 쓰면 안 된다.
+    if ev["kind"] == "BUY" and ev.get("live"):
+        when = kst(ev["at"]) + " KST   (" + et_label(ev["at"]) + ")"
+    else:
+        when = kst_bar(ev["at"]) + " KST 마감   (봉 " + et_bar(ev["at"]) + ")"
     k = ev["kind"]
 
     if k == "BUY":
         lv = S.levels(state)
+        if ev.get("live"):
+            head = (
+                "🔵 SOXL 매수 신호 — 실시간\n" + when + "\n\n"
+                + "예상 RSI(12) = %.1f  ≤ 25\n" % ev["rsi"]
+                + "현재가 $%.2f\n\n" % ev["price"]
+                + "※ 봉 마감 전 실시간 값 기준입니다. 이후 이 봉이 25 위로 "
+                  "마감돼도 이미 기록된 진입은 되돌리지 않습니다.\n\n"
+            )
+        else:
+            head = (
+                "🔵 SOXL 매수 신호\n" + when + "\n\n"
+                + "RSI(12) = %.1f  ≤ 25\n" % ev["rsi"]
+                + "봉 종가 $%.2f\n\n" % ev["price"]
+            )
         return (
-            "🔵 SOXL 매수 신호\n" + when + "\n\n"
-            + "RSI(12) = %.1f  ≤ 25\n" % ev["rsi"]
-            + "봉 종가 $%.2f\n\n" % ev["price"]
+            head
             + "하드스탑 $%.2f  (-30%%)\n" % lv["hard"]
             + "발동선   $%.2f  (+10%%)\n\n" % lv["arm"]
-            + "이 종가로 상태를 기록했습니다.\n"
+            + "이 가격으로 상태를 기록했습니다.\n"
             + "실제 체결가가 다르면  /entry 123.45\n"
             + "매수 안 하셨으면      /skip"
         )
@@ -462,28 +483,57 @@ def main():
             messages.append(render_summary(state))
             state["last_summary_date"] = day
 
-    # ── 시간외 포함 즉시 알림 ────────────────────────────────
-    # 봉 마감을 기다리지 않는다. 프리장·애프터장에도 그대로 돈다.
-    # 어느 쪽도 status/entry/peak 을 건드리지 않으므로 백테스트는 그대로다.
+    # ── 실시간 현재가 ────────────────────────────────────────
+    # 봉 마감을 기다리지 않는다. 프리장·애프터장·오버나잇에도 그대로 돈다.
+    # 여기서 정한 값은 표시(/status·대시보드·예고)에만 쓰고 status/entry/peak
+    # 은 건드리지 않으므로 백테스트는 그대로다.
+    #
+    # 기본 소스는 Alpaca 실시간 체결가다. Yahoo 5분봉(raw)은 판정용 확정봉을
+    # 만드는 데는 쓰지만, 예외 없이 최근 며칠치가 통째로 빠진 응답을 돌려줄
+    # 때가 있어(2026-09 초 실측 — 확정봉은 정상 갱신되는데 현재가만 수십 시간
+    # 전 값으로 멈춰 있었다) 표시용 "현재가"의 기본 소스로는 못 믿는다.
+    # Alpaca 키가 없거나 요청이 실패하면 Yahoo tick 으로 되돌아간다(예전 동작).
+    src = "yahoo"
     tick_at = raw.index[-1]
     price = float(raw["close"].iloc[-1])
 
-    # 시세가 멈추는 시간대(ET 20:00~04:00)에는 마지막 봉이 몇 시간씩 남는다.
+    alt = fetch_alpaca_quote("overnight" if in_overnight_window(now) else None)
+    if alt is not None:
+        price, tick_at = alt
+        src = "alpaca"
+
+    # 방금 고른 틱이 이미 저장돼 있던 틱보다 더 옛날이면(소스 쪽 일시적 결함으로
+    # 데이터가 되돌아간 것) 화면에 내보내지 않고 기존 값을 그대로 유지한다.
+    prev_tick = state.get("tick")
+    if prev_tick and pd.Timestamp(prev_tick["at"]) > tick_at:
+        price = prev_tick["price"]
+        tick_at = pd.Timestamp(prev_tick["at"])
+        src = prev_tick.get("src", src)
+
+    # 시세가 멈추는 시간대에는 마지막 틱이 몇 시간씩 남을 수 있다.
     # 그걸 현재가로 취급하면 예고·급등락이 묵은 가격으로 나간다.
     stale = (now - tick_at).total_seconds() > TICK_STALE_SEC
-
-    # Yahoo 가 안 주는 그 구간은 Alpaca 오버나잇 피드로 보충한다 (ALPACA_API_KEY
-    # 미설정이면 조용히 원래대로 stale 처리 — 필수 소스가 아니다).
-    if stale and in_overnight_window(now):
-        alt = fetch_alpaca_overnight()
-        if alt is not None:
-            price, tick_at = alt
-            stale = (now - tick_at).total_seconds() > TICK_STALE_SEC
-
     sess = session_of(tick_at)
 
     if not stale:
         rsi_live = S.preview_rsi(hourly.iloc[-1], price)
+
+        # 실시간 진입 — 정규장 중에는 확정봉을 기다리지 않고 실시간 RSI 로도
+        # 매수 신호를 낸다. 장중에 반짝 25 아래로 찍었다가 그 봉 종가에는 다시
+        # 올라오는 경우, 예전엔 신호가 아예 안 갔지만 이제는 그 순간 진입으로
+        # 기록된다(봉이 마감되면 이 진입가를 기준으로 트레일링/스탑을 이어 판정).
+        # 정규장 밖은 그대로 preview_events 의 "예고"로만 남는다.
+        if (not cold and sess == "정규장" and state["status"] == "FLAT"
+                and rsi_live is not None and rsi_live <= S.RSI_TH):
+            state.update(status="HOLD", entry=price, peak=price,
+                        entry_time=now.isoformat())
+            ev = {"kind": "BUY", "at": now.isoformat(), "price": price,
+                  "rsi": rsi_live, "live": True}
+            with SIGNAL_LOG.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
+            messages.append(render_event(ev, state))
+            state["recent"] = (state.get("recent", []) + [ev])[-8:]
+
         for ev in dedup_previews(state, preview_events(state, price, rsi_live)):
             messages.append(render_preview(ev, sess, tick_at))
 
@@ -492,7 +542,7 @@ def main():
             messages.append(render_move(hit, sess))
 
     # 마지막으로 본 시세. 판정에는 안 쓰고 /status·대시보드 표시 전용이다.
-    state["tick"] = {"price": price, "at": tick_at.isoformat(), "sess": sess}
+    state["tick"] = {"price": price, "at": tick_at.isoformat(), "sess": sess, "src": src}
     state["last_run"] = now.isoformat()
     state.pop("last_error", None)
 

@@ -75,7 +75,13 @@ gh auth refresh -h github.com -s workflow   # 워크플로 푸시에 필요. 대
 gh secret set WORKER_URL                    # https://soxl-bot.<계정>.workers.dev
 gh secret set BOT_SYNC_SECRET
 gh secret set TWELVEDATA_API_KEY            # 선택 — yfinance 예비 소스
+gh secret set ALPACA_API_KEY                # 권장 — 실시간 "현재가" 기본 소스
+gh secret set ALPACA_SECRET_KEY
 ```
+
+`ALPACA_API_KEY`/`ALPACA_SECRET_KEY` 없이도 봇은 동작하지만, 그러면 "현재가"가
+Yahoo 5분봉의 마지막 값으로 대체되고 이게 간헐적으로 며칠씩 묵을 수 있다
+(매매 판정용 확정봉과는 무관 — 그쪽은 항상 정상 갱신된다).
 
 ## 6. 첫 실행
 
