@@ -99,6 +99,8 @@ def fetch_alpaca_quote(feed=None):
         )
         r.raise_for_status()
         t = r.json()["trade"]
+        print("Alpaca " + (feed or "기본") + " 체결 원본: " + json.dumps(t),
+              file=sys.stderr)
         return float(t["p"]), pd.Timestamp(t["t"])
     except Exception as exc:
         print("Alpaca " + (feed or "실시간") + " 시세 실패: " + str(exc), file=sys.stderr)
