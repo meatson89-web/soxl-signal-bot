@@ -80,7 +80,14 @@ def fetch_twelvedata(api_key):
 
 
 def fetch_alpaca_quote(feed=None):
-    """Alpaca 최신 체결가. "현재가" 표시의 기본 소스다 (판정에는 안 쓴다).
+    """Alpaca 최신 호가(bid/ask) 중간값. "현재가" 표시의 기본 소스다 (판정에는 안 쓴다).
+
+    체결(trade) 이 아니라 호가(quote) 를 쓴다 — 체결은 실제로 거래가 나야만
+    갱신되는데, 오버나잇처럼 거래가 뜸한 시간대엔 몇 시간이고 그대로일 수
+    있다(2026-09 초 실측 — 같은 체결이 사흘째 그대로였다). 호가는 거래가
+    없어도 마켓메이커가 계속 갱신하므로 "지금 얼마인가"에 더 가깝다. Alpaca
+    공식 가이드도 오버나잇 시세는 Trades 가 아니라 Quotes 엔드포인트를 쓰라고
+    안내한다.
 
     feed=None  → 기본(정규장·프리장·애프터장) 피드.
     feed="overnight" → Blue Ocean ATS 오버나잇(ET 20:00~04:00) 피드.
@@ -92,16 +99,25 @@ def fetch_alpaca_quote(feed=None):
         return None
     try:
         r = requests.get(
-            f"https://data.alpaca.markets/v2/stocks/{TICKER}/trades/latest",
+            f"https://data.alpaca.markets/v2/stocks/{TICKER}/quotes/latest",
             params={"feed": feed} if feed else {},
             headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
             timeout=15,
         )
         r.raise_for_status()
-        t = r.json()["trade"]
-        print("Alpaca " + (feed or "기본") + " 체결 원본: " + json.dumps(t),
+        q = r.json()["quote"]
+        print("Alpaca " + (feed or "기본") + " 호가 원본: " + json.dumps(q),
               file=sys.stderr)
-        return float(t["p"]), pd.Timestamp(t["t"])
+        bid, ask = float(q.get("bp") or 0), float(q.get("ap") or 0)
+        if bid > 0 and ask > 0:
+            price = (bid + ask) / 2.0
+        elif ask > 0:
+            price = ask
+        elif bid > 0:
+            price = bid
+        else:
+            return None
+        return price, pd.Timestamp(q["t"])
     except Exception as exc:
         print("Alpaca " + (feed or "실시간") + " 시세 실패: " + str(exc), file=sys.stderr)
         return None
