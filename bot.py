@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""SOXL B전략 알림 봇 — GitHub Actions 에서 15분마다 실행된다.
+"""SOXL 추천C 알림 봇 — GitHub Actions 에서 15분마다 실행된다.
 
 멱등(idempotent): "지금 몇 시냐"가 아니라 "KV 의 last_bar 이후 확정된 봉이
 있냐"로 판단한다. cron 이 늦거나 건너뛰어도 다음 실행이 밀린 봉을 전부 처리한다.
@@ -57,6 +57,22 @@ def fetch_yahoo():
     df = df.rename(columns=str.lower)[["open", "high", "low", "close"]]
     df.index = pd.to_datetime(df.index, utc=True)
     return df.dropna().sort_index()
+
+
+def fetch_index_daily():
+    """추세 필터용 SOX 일봉 종가. 200일선을 잡으려면 2년치를 받는다."""
+    import yfinance as yf
+
+    df = yf.download(S.IDX_TICKER, interval="1d", period="2y", auto_adjust=False,
+                     progress=False, threads=False)
+    if df is None or df.empty:
+        raise RuntimeError(S.IDX_TICKER + " 일봉 응답이 비었습니다")
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [c[0] for c in df.columns]
+    close = df.rename(columns=str.lower)["close"].dropna()
+    if len(close) <= S.MA_LEN:
+        raise RuntimeError(S.IDX_TICKER + " 일봉 %d개 — 200일선 계산 불가" % len(close))
+    return close
 
 
 def fetch_twelvedata(api_key):
@@ -249,12 +265,12 @@ def in_overnight_window(ts_utc):
     return h >= 20 or h < 4
 
 
-def preview_events(state, price, rsi_live):
+def preview_events(state, price, rsi_live, bull_now):
     """지금 가격이 다음 정규장 봉 종가라면 신호가 되는가. 상태는 안 바꾼다."""
     lv = S.levels(state)
     out = []
     if state["status"] == "FLAT":
-        if rsi_live is not None and rsi_live <= S.RSI_TH:
+        if bull_now and rsi_live is not None and rsi_live <= S.RSI_TH:
             out.append({"kind": "PRE_BUY", "price": price, "rsi": rsi_live})
         return out
     if state["status"] == "HOLD" and price >= lv["arm"]:
@@ -307,6 +323,15 @@ def move_alert(state, mv, now):
         fired = dict(mv, step=step, side=side)
     state["move_seen"] = box
     return fired
+
+
+def first_block_today(state, at):
+    """필터 차단 알림은 ET 하루 한 번만. 하락장에선 RSI 25 이하가 며칠씩 이어진다."""
+    day = str(pd.Timestamp(at).tz_convert(ET).date())
+    if state.get("block_date") == day:
+        return False
+    state["block_date"] = day
+    return True
 
 
 # ── 메시지 ───────────────────────────────────────────────────
@@ -364,6 +389,18 @@ def render_event(ev, state):
             + "실제 체결가가 다르면  /entry 123.45\n"
             + "매수 안 하셨으면      /skip"
         )
+    if k == "BLOCK":
+        tr = state.get("trend") or {}
+        rsi_txt = ("예상 RSI(12) = %.1f" if ev.get("live") else "RSI(12) = %.1f") % ev["rsi"]
+        return (
+            "✕ SOXL 매수 조건 충족 — 추세 필터가 차단\n" + when + "\n\n"
+            + rsi_txt + "  ≤ 25\n"
+            + "전일 SOX %s  <  200일선 %s\n\n" % (
+                "-" if tr.get("idx") is None else "%.0f" % tr["idx"],
+                "-" if tr.get("ma") is None else "%.0f" % tr["ma"])
+            + "하락 국면이라 진입하지 않습니다. 상태는 미보유 그대로입니다.\n"
+            + "(오늘은 이 알림을 더 보내지 않습니다)"
+        )
     if k == "ARM":
         lv = S.levels(state)
         return (
@@ -403,6 +440,13 @@ def render_summary(state):
             + "기준봉 " + kst_bar(state["last_bar"]) + " KST 마감"
             + "  (" + et_bar(state["last_bar"]) + ")\n\n"
             + "봉 종가 $%.2f   RSI(12) %.1f\n" % (close, rsi))
+    tr = state.get("trend")
+    if tr and tr.get("idx") is not None and tr.get("ma") is not None:
+        head += "추세 필터 %s  (전일 SOX %.0f / 200일선 %.0f, %+.1f%%)\n" % (
+            "상승 국면 · 진입 허용" if tr["bull"] else "하락 국면 · 진입 차단",
+            tr["idx"], tr["ma"], (tr["idx"] / tr["ma"] - 1) * 100)
+    elif tr:
+        head += "추세 필터 판정 불가 · 진입 차단 (SOX 시세 없음)\n"
 
     if state["status"] == "FLAT":
         return head + ("\n상태: FLAT (미보유)\n"
@@ -453,6 +497,31 @@ def main():
         print("확정된 봉이 없습니다.")
         return 0
 
+    # 추세 필터 — SOX 를 못 받으면 진입을 막는다(파인에서 na 면 bull=false 인 것과 같다).
+    # 청산은 필터와 무관하므로 그대로 돈다.
+    try:
+        sox = fetch_index_daily()
+        gate = S.trend_gate(hourly.index, sox)
+        now_gate = S.trend_gate(pd.DatetimeIndex([now]), sox).iloc[0]
+        if state.pop("trend_error", None):
+            send("✅ SOX 시세 복구 — 추세 필터 정상 동작", args.dry)
+    except Exception as exc:
+        print("SOX 일봉 실패: " + str(exc), file=sys.stderr)
+        gate = pd.DataFrame({"bull": False}, index=hourly.index)
+        now_gate = pd.Series({"bull": False, "idx": float("nan"), "ma": float("nan")})
+        if not state.get("trend_error"):
+            send("🚨 SOXL 봇 — SOX 일봉 수신 실패\n" + kst(now.isoformat())
+                 + " KST\n\n추세 필터를 판정할 수 없어 복구될 때까지 매수 신호를 막습니다.\n"
+                 + "청산(트레일링·하드스탑)은 정상 동작합니다.\n\n" + str(exc)[:200], args.dry)
+        state["trend_error"] = str(exc)[:200]
+    hourly = hourly.assign(bull=gate["bull"].astype(bool))
+    bull_now = bool(now_gate["bull"])
+    state["trend"] = {
+        "bull": bull_now,
+        "idx": None if pd.isna(now_gate["idx"]) else round(float(now_gate["idx"]), 2),
+        "ma": None if pd.isna(now_gate["ma"]) else round(float(now_gate["ma"]), 2),
+    }
+
     last_bar = state.get("last_bar")
     cold = not last_bar
     if last_bar:
@@ -474,11 +543,14 @@ def main():
                 fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
             if cold:          # 복원 중이다. 과거 신호를 쏟아내지 않는다.
                 continue
+            if ev["kind"] == "BLOCK" and not first_block_today(state, ev["at"]):
+                continue
             messages.append(render_event(ev, state))
             if ev["kind"] == "SELL_HARD":
                 state["urgent"] = {"text": messages[-1], "left": 2}
         # 대시보드에 띄울 최근 신호 이력
-        state["recent"] = (state.get("recent", []) + events)[-8:]
+        state["recent"] = (state.get("recent", [])
+                           + [e for e in events if e["kind"] != "BLOCK"])[-8:]
         if cold:
             messages.append("\U0001F195 SOXL 봇 상태 초기화\n최근 %d봉을 재생해 "
                             "현재 상태를 복원했습니다.\n\n" % len(fresh)
@@ -544,8 +616,14 @@ def main():
         # 올라오는 경우, 예전엔 신호가 아예 안 갔지만 이제는 그 순간 진입으로
         # 기록된다(봉이 마감되면 이 진입가를 기준으로 트레일링/스탑을 이어 판정).
         # 정규장 밖은 그대로 preview_events 의 "예고"로만 남는다.
-        if (not cold and sess == "정규장" and state["status"] == "FLAT"
-                and rsi_live is not None and rsi_live <= S.RSI_TH):
+        live_dip = (not cold and sess == "정규장" and state["status"] == "FLAT"
+                    and rsi_live is not None and rsi_live <= S.RSI_TH)
+        if live_dip and not bull_now:
+            ev = {"kind": "BLOCK", "at": now.isoformat(), "price": price,
+                  "rsi": rsi_live, "live": True}
+            if first_block_today(state, ev["at"]):
+                messages.append(render_event(ev, state))
+        elif live_dip:
             state.update(status="HOLD", entry=price, peak=price,
                         entry_time=now.isoformat())
             ev = {"kind": "BUY", "at": now.isoformat(), "price": price,
@@ -555,7 +633,7 @@ def main():
             messages.append(render_event(ev, state))
             state["recent"] = (state.get("recent", []) + [ev])[-8:]
 
-        for ev in dedup_previews(state, preview_events(state, price, rsi_live)):
+        for ev in dedup_previews(state, preview_events(state, price, rsi_live, bull_now)):
             messages.append(render_preview(ev, sess, tick_at))
 
         hit = move_alert(state, day_move(raw, now), now)

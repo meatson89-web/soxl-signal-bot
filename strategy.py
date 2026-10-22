@@ -26,6 +26,12 @@ HARD_PCT = 0.30     # 진입가 -30%. 이 전략의 본체다.
 RTH_OPEN = dt.time(9, 30)
 RTH_CLOSE = dt.time(16, 0)   # 미포함
 
+# ── 추세 필터 (추천C) ────────────────────────────────────────
+# 전일 SOX 종가 > SOX 200일선 일 때만 진입한다. 청산에는 관여하지 않는다.
+# 필터를 빼면 MDD 가 -40.8% → -66.3% 로 벌어진다(추천B).
+IDX_TICKER = "^SOX"
+MA_LEN = 200
+
 
 def to_hourly(bars: pd.DataFrame) -> pd.DataFrame:
     """분봉(UTC tz-aware index, open/high/low/close) → 정규장 1시간봉."""
@@ -72,6 +78,32 @@ def preview_rsi(last_row, price, length: int = RSI_LEN):
     return 100.0 if ad == 0 else 100 - 100 / (1 + au / ad)
 
 
+def trend_gate(index: pd.DatetimeIndex, idx_close: pd.Series) -> pd.DataFrame:
+    """각 시각에 대해 '그 날짜 이전 마지막 거래일'의 지수 종가 > 200일선 여부.
+
+    make_C_excel.py 의 shift(1) 게이트와 같다. 오늘 일봉(장중 미완성)은
+    날짜가 같으므로 절대 쓰지 않는다 → 룩어헤드 없음.
+    200일선이 안 잡히면(데이터 부족) 진입을 막는 쪽으로 판정한다.
+    반환 열: bull(bool), idx(전일 지수 종가), ma(전일 200일선)
+    """
+    c = idx_close.dropna().astype(float).sort_index()
+    days = pd.DatetimeIndex(c.index)
+    if days.tz is not None:
+        days = days.tz_convert("America/New_York").tz_localize(None)
+    days = days.normalize()
+    ma = c.rolling(MA_LEN).mean().to_numpy()
+    cv = c.to_numpy()
+
+    bar_days = index.tz_convert("America/New_York").tz_localize(None).normalize()
+    pos = days.searchsorted(bar_days, side="left") - 1   # 날짜가 엄격히 이전인 마지막 행
+    ok = pos >= 0
+    p = np.where(ok, pos, 0)
+    idx_v = np.where(ok, cv[p], np.nan)
+    ma_v = np.where(ok, ma[p], np.nan)
+    bull = ok & ~np.isnan(ma_v) & (idx_v > ma_v)
+    return pd.DataFrame({"bull": bull, "idx": idx_v, "ma": ma_v}, index=index)
+
+
 def drop_incomplete(hourly: pd.DataFrame, now_utc: pd.Timestamp,
                     settle_sec: int = 120) -> pd.DataFrame:
     """미완성 봉 제거. 봉 H 는 H+1h 가 지나고 settle_sec 이 더 흘러야 확정."""
@@ -112,6 +144,8 @@ def process(state: dict, bars: pd.DataFrame) -> tuple[dict, list[dict]]:
 
     판정 순서는 Pine 원본 그대로다 — 청산이 진입보다 먼저이고,
     같은 봉에서 청산 후 재진입이 허용된다.
+    bars 에 'bull' 열이 있으면 추세 필터(추천C)를 적용하고, 없으면 추천B 그대로다.
+    필터가 막은 진입은 상태를 바꾸지 않고 BLOCK 이벤트만 남긴다.
     """
     st = dict(state)
     events: list[dict] = []
@@ -148,10 +182,15 @@ def process(state: dict, bars: pd.DataFrame) -> tuple[dict, list[dict]]:
                 st.update(status="FLAT", entry=None, peak=None, entry_time=None)
 
         if st["status"] == "FLAT" and pd.notna(rsi) and float(rsi) <= RSI_TH:
-            st.update(status="HOLD", entry=close, peak=close, entry_time=stamp)
-            events.append({
-                "kind": "BUY", "at": stamp, "price": close, "rsi": float(rsi),
-            })
+            if "bull" in row.index and not bool(row["bull"]):
+                events.append({
+                    "kind": "BLOCK", "at": stamp, "price": close, "rsi": float(rsi),
+                })
+            else:
+                st.update(status="HOLD", entry=close, peak=close, entry_time=stamp)
+                events.append({
+                    "kind": "BUY", "at": stamp, "price": close, "rsi": float(rsi),
+                })
 
         st["last_bar"] = stamp
         st["last_close"] = close
