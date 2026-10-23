@@ -111,6 +111,18 @@ function feedNote(t) {
   return "   ※ 20분 넘게 갱신이 없습니다. 봇 상태를 확인하세요.\n";
 }
 
+// 추세 필터(추천C) — bot.py 가 매 실행마다 state.trend 에 전일 SOX 종가·200일선을 남긴다.
+// 진입에만 쓰이고 청산과는 무관하다.
+function trendText(s) {
+  const t = s.trend;
+  let out = "🧭 추세 필터 (전일 SOX 종가 > 200일선)\n";
+  if (!t) return out + "   판정 정보 없음 — 봇 다음 실행 대기\n";
+  if (t.idx == null || t.ma == null) return out + "   판정 불가 · 진입 차단 (SOX 시세 없음)\n";
+  const num = (v) => v.toLocaleString("en-US", { maximumFractionDigits: 0 });
+  return out + `   ${t.bull ? "🟢 상승 국면 · 진입 허용" : "🔴 하락 국면 · 진입 차단"}\n`
+    + `   SOX ${num(t.idx)} / 200일선 ${num(t.ma)}  (${pct(t.idx / t.ma - 1)})\n`;
+}
+
 // /status 는 세 구획으로 나눈다: 실시간 현재가(참고용) → 확정봉(매매 판정의
 // 유일한 근거) → 포지션. 셋을 한 문단에 섞으면 "현재가"와 "판정 기준 종가"가
 // 다른 숫자라는 게 안 보여서 혼동이 생긴다.
@@ -131,7 +143,8 @@ function statusText(s) {
   }
   out += "📐 확정봉 (매매 판정 기준)\n";
   out += `   ${kstBar(s.last_bar)} KST 마감${barAge(s.last_bar)}\n`;
-  out += `   종가 ${money(c)}   RSI(12) ${s.last_rsi == null ? "-" : s.last_rsi.toFixed(1)}\n`;
+  out += `   종가 ${money(c)}   RSI(12) ${s.last_rsi == null ? "-" : s.last_rsi.toFixed(1)}\n\n`;
+  out += trendText(s);
   out += DIV;
 
   if (s.status === "FLAT") {
@@ -142,6 +155,7 @@ function statusText(s) {
       out += r <= RSI_TH
         ? `진입 조건 RSI ≤ ${RSI_TH} 충족 중  (${(RSI_TH - r).toFixed(1)}p 아래)`
         : `진입 조건 RSI ≤ ${RSI_TH} 까지 ${(r - RSI_TH).toFixed(1)}p 남음`;
+      if (!s.trend?.bull) out += "\n단, 추세 필터가 진입을 막고 있습니다.";
     }
     return out;
   }
@@ -159,7 +173,7 @@ function statusText(s) {
 }
 
 const HELP = [
-  "SOXL B전략 알림봇",
+  "SOXL 추천C 알림봇 (RSI ≤ 25 + SOX 200일선 필터)",
   "",
   "/status         현재 상태와 트리거까지 거리",
   "/entry 123.45   진입가를 실제 체결가로 정정",
