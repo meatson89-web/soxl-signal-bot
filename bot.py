@@ -277,8 +277,9 @@ def preview_events(state, price, rsi_live, bull_now):
         out.append({"kind": "PRE_ARM", "price": price, "level": lv["arm"]})
     if state["status"] == "ARMED" and price <= lv["trail"]:
         out.append({"kind": "PRE_TRAIL", "price": price, "level": lv["trail"]})
-    if price <= lv["hard"]:
-        out.append({"kind": "PRE_HARD", "price": price, "level": lv["hard"]})
+    if price <= lv["hard"] and not state.get("hard_wait"):
+        out.append({"kind": "PRE_HARD", "price": price, "level": lv["hard"],
+                    "blocked": not bull_now})
     return out
 
 
@@ -345,6 +346,8 @@ def render_preview(ev, sess, at):
     else:
         out += "기준선 $%.2f  (%+.1f%%)\n" % (
             ev["level"], (ev["price"] / ev["level"] - 1) * 100)
+    if ev.get("blocked"):
+        out += "\n진입 차단 중이라 종가가 확정돼도 매도는 보류됩니다."
     return out + "\n※ 아직 확정 아닙니다. 정규장 1시간봉 종가로만 확정됩니다."
 
 
@@ -419,6 +422,28 @@ def render_event(ev, state):
             + "보유 시작 " + kst(ev["held_since"]) + " KST\n\n"
             + "매도 완료하시면  /sold"
         )
+    if k == "HOLD_WAIT":
+        return (
+            "⏸ SOXL 하드스탑 도달 — 매도 보류\n" + when + "\n\n"
+            + "진입 $%.2f → 현재 $%.2f   (%+.1f%%)\n" % (
+                ev["entry"], ev["price"], ev["ret"] * 100)
+            + "추세 필터 진입 차단 중이라 지금 팔지 않습니다.\n"
+            + "차단이 풀리면 첫 1시간봉 종가에 전량 매도 신호를 보냅니다.\n\n"
+            + _release_line(state.get("trend") or {})
+            + "지금 매도하지 마세요. 이미 파셨다면  /sold"
+        )
+    if k == "SELL_RELEASE":
+        wait = ev.get("wait") or {}
+        return (
+            "⚫ SOXL 매도 신호 — 진입 차단 해제\n" + when + "\n\n"
+            + "추세 필터 진입 차단이 풀렸습니다. 보류했던 하드스탑을 매도하세요.\n\n"
+            + "진입 $%.2f → 현재 $%.2f   (%+.1f%%)\n" % (
+                ev["entry"], ev["price"], ev["ret"] * 100)
+            + ("보류 시작 $%.2f → 현재 %+.1f%%\n" % (
+                wait["price"], (ev["price"] / wait["price"] - 1) * 100) if wait else "")
+            + "\n가격과 상관없이 전량 매도합니다. 다음 진입은 새 신호를 기다립니다.\n\n"
+            + "매도 완료하시면  /sold"
+        )
     if k == "SELL_HARD":
         return (
             "⚫ SOXL 매도 신호 — 하드스탑\n" + when + "\n\n"
@@ -430,6 +455,27 @@ def render_event(ev, state):
             + "매도 완료하시면  /sold"
         )
     return k + " " + when
+
+
+def _release_line(tr):
+    """차단 해제까지 SOX 가 얼마나 올라야 하는지 한 줄. 200일선은 매일 조금씩 움직인다."""
+    if tr.get("idx") is None or tr.get("ma") is None:
+        return ""
+    return "해제 조건: SOX 종가 > 200일선\n전일 SOX %.0f / 200일선 %.0f  (해제까지 %+.1f%%)\n\n" % (
+        tr["idx"], tr["ma"], (tr["ma"] / tr["idx"] - 1) * 100)
+
+
+def render_release_soon(state, close):
+    entry = float(state["entry"])
+    tr = state.get("trend") or {}
+    return (
+        "🔔 SOXL 진입 차단 해제 — 오늘 밤 매도 예정\n\n"
+        + "전일 SOX %.0f  >  200일선 %.0f\n\n" % (tr["idx"], tr["ma"])
+        + "보류 중인 하드스탑을 오늘 정규장 첫 1시간봉 종가에 매도합니다.\n"
+        + "진입 $%.2f · 최근 종가 $%.2f  (%+.1f%%)\n\n" % (
+            entry, close, (close / entry - 1) * 100)
+        + "봉이 마감되면 매도 신호를 다시 보냅니다."
+    )
 
 
 def render_summary(state):
@@ -467,6 +513,11 @@ def render_summary(state):
             lv["arm"], (lv["arm"] / close - 1) * 100)
     body += "하드스탑 $%.2f   (종가 대비 %+.1f%%)" % (
         lv["hard"], (lv["hard"] / close - 1) * 100)
+    wait = state.get("hard_wait")
+    if wait:
+        body += ("\n\n⏸ 매도 보류 중  (" + kst_bar(wait["at"]) + " KST 도달, $%.2f)\n" % wait["price"]
+                 + _release_line(tr or {}).rstrip()
+                 + "\n차단이 풀리면 첫 1시간봉 종가에 전량 매도합니다.")
     return head + body
 
 
@@ -498,23 +549,23 @@ def main():
         return 0
 
     # 추세 필터 — SOX 를 못 받으면 진입을 막는다(파인에서 na 면 bull=false 인 것과 같다).
-    # 청산은 필터와 무관하므로 그대로 돈다.
+    # 트레일링은 필터와 무관하고, 하드스탑은 known=False 라서 보류 없이 평소대로 나간다.
     try:
         sox = fetch_index_daily()
-        gate = S.trend_gate(hourly.index, sox)
+        gate = S.trend_gate(hourly.index, sox).assign(known=True)
         now_gate = S.trend_gate(pd.DatetimeIndex([now]), sox).iloc[0]
         if state.pop("trend_error", None):
             send("✅ SOX 시세 복구 — 추세 필터 정상 동작", args.dry)
     except Exception as exc:
         print("SOX 일봉 실패: " + str(exc), file=sys.stderr)
-        gate = pd.DataFrame({"bull": False}, index=hourly.index)
+        gate = pd.DataFrame({"bull": False, "known": False}, index=hourly.index)
         now_gate = pd.Series({"bull": False, "idx": float("nan"), "ma": float("nan")})
         if not state.get("trend_error"):
             send("🚨 SOXL 봇 — SOX 일봉 수신 실패\n" + kst(now.isoformat())
                  + " KST\n\n추세 필터를 판정할 수 없어 복구될 때까지 매수 신호를 막습니다.\n"
                  + "청산(트레일링·하드스탑)은 정상 동작합니다.\n\n" + str(exc)[:200], args.dry)
         state["trend_error"] = str(exc)[:200]
-    hourly = hourly.assign(bull=gate["bull"].astype(bool))
+    hourly = hourly.assign(bull=gate["bull"].astype(bool), known=gate["known"].astype(bool))
     bull_now = bool(now_gate["bull"])
     state["trend"] = {
         "bull": bull_now,
@@ -546,7 +597,7 @@ def main():
             if ev["kind"] == "BLOCK" and not first_block_today(state, ev["at"]):
                 continue
             messages.append(render_event(ev, state))
-            if ev["kind"] == "SELL_HARD":
+            if ev["kind"] in ("SELL_HARD", "SELL_RELEASE"):
                 state["urgent"] = {"text": messages[-1], "left": 2}
         # 대시보드에 띄울 최근 신호 이력
         state["recent"] = (state.get("recent", [])
@@ -555,6 +606,12 @@ def main():
             messages.append("\U0001F195 SOXL 봇 상태 초기화\n최근 %d봉을 재생해 "
                             "현재 상태를 복원했습니다.\n\n" % len(fresh)
                             + render_summary(state))
+
+    # 보류 중 차단이 풀렸으면 정규장 시작 전에 미리 알린다. 판정은 process() 가 봉 종가로 한다.
+    wait = state.get("hard_wait")
+    if wait and bull_now and not wait.get("notified") and not cold:
+        wait["notified"] = True
+        messages.append(render_release_soon(state, float(hourly["close"].iloc[-1])))
 
     # 하드스탑은 놓치면 안 되므로 15분 간격으로 2회 더 재발송한다.
     urgent = state.get("urgent")

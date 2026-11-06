@@ -112,7 +112,7 @@ function feedNote(t) {
 }
 
 // 추세 필터(추천C) — bot.py 가 매 실행마다 state.trend 에 전일 SOX 종가·200일선을 남긴다.
-// 진입에만 쓰이고 청산과는 무관하다.
+// 진입을 막고, 차단 중 하드스탑은 해제될 때까지 보류시킨다(bot.py 의 state.hard_wait).
 function trendText(s) {
   const t = s.trend;
   let out = "🧭 추세 필터 (전일 SOX 종가 > 200일선)\n";
@@ -169,6 +169,10 @@ function statusText(s) {
     out += `발동선 ${money(lv.arm)}  (종가 대비 ${pct(lv.arm / c - 1)})\n`;
   }
   out += `하드스탑 ${money(lv.hard)}  (종가 대비 ${pct(lv.hard / c - 1)})`;
+  if (s.hard_wait) {
+    out += `\n\n⏸ 매도 보류 중  (${kstBar(s.hard_wait.at)} KST 도달, ${money(s.hard_wait.price)})\n`
+      + "진입 차단이 풀리면 첫 1시간봉 종가에 전량 매도합니다.";
+  }
   return out;
 }
 
@@ -204,6 +208,7 @@ async function handleCommand(env, chatId, text) {
     s.peak = Math.max(num, s.peak ?? num);
     s.status = s.peak >= num * (1 + ARM_PCT) ? "ARMED" : "HOLD";
     delete s.urgent;
+    delete s.hard_wait;
     await putState(env, s);
     return `진입가를 ${money(num)} 로 정정했습니다.\n\n${statusText(s)}`;
   }
@@ -216,6 +221,7 @@ async function handleCommand(env, chatId, text) {
     s.entry_time = new Date().toISOString();
     if (s.peak >= num * (1 + ARM_PCT)) s.status = "ARMED";
     delete s.urgent;
+    delete s.hard_wait;
     await putState(env, s);
     return `보유로 등록했습니다.\n\n${statusText(s)}`;
   }
@@ -225,6 +231,7 @@ async function handleCommand(env, chatId, text) {
     if (s.status === "FLAT") return "보유 중이 아닙니다.";
     s.peak = num;
     s.status = num >= s.entry * (1 + ARM_PCT) ? "ARMED" : "HOLD";
+    if (s.status === "ARMED") delete s.hard_wait;
     await putState(env, s);
     return `고점을 ${money(num)} 로 보정했습니다.\n\n${statusText(s)}`;
   }
@@ -235,6 +242,7 @@ async function handleCommand(env, chatId, text) {
     s.status = "FLAT";
     s.entry = null; s.peak = null; s.entry_time = null;
     delete s.urgent;
+    delete s.hard_wait;
     await putState(env, s);
     const verb = cmd === "/skip" ? "건너뛴 것으로" : "매도한 것으로";
     return `${money(was)} 진입분을 ${verb} 처리했습니다. 이제 FLAT 입니다.\n\n`
@@ -289,12 +297,13 @@ function dashboard(s, bars) {
     } else {
       rows.push(["발동선 (+10%)", money(lv.arm), `종가 대비 ${pct(lv.arm / c - 1)}`]);
     }
-    rows.push(["하드스탑 (-30%)", money(lv.hard), `종가 대비 ${pct(lv.hard / c - 1)}`]);
+    rows.push(["하드스탑 (-30%)", money(lv.hard), s.hard_wait ? "매도 보류 중 · 차단 해제 시 매도" : `종가 대비 ${pct(lv.hard / c - 1)}`]);
   }
 
   const KIND = {
     BUY: ["🔵", "매수 신호"], ARM: ["🟢", "트레일링 발동"],
     SELL_TRAIL: ["🔴", "매도 — 트레일링"], SELL_HARD: ["⚫", "매도 — 하드스탑"],
+    HOLD_WAIT: ["⏸", "하드스탑 보류"], SELL_RELEASE: ["⚫", "매도 — 차단 해제"],
   };
   const recent = (s.recent || []).slice().reverse().map((e) => {
     const [icon, name] = KIND[e.kind] || ["•", e.kind];

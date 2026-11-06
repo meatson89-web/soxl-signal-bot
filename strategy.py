@@ -27,7 +27,8 @@ RTH_OPEN = dt.time(9, 30)
 RTH_CLOSE = dt.time(16, 0)   # 미포함
 
 # ── 추세 필터 (추천C) ────────────────────────────────────────
-# 전일 SOX 종가 > SOX 200일선 일 때만 진입한다. 청산에는 관여하지 않는다.
+# 전일 SOX 종가 > SOX 200일선 일 때만 진입한다. 트레일링 청산에는 관여하지 않는다.
+# 진입 차단 중 하드스탑에 닿으면 매도를 보류하고, 차단이 풀린 첫 봉 종가에 판다(2026-11-06 채택).
 # 필터를 빼면 MDD 가 -40.8% → -66.3% 로 벌어진다(추천B).
 IDX_TICKER = "^SOX"
 MA_LEN = 200
@@ -146,6 +147,9 @@ def process(state: dict, bars: pd.DataFrame) -> tuple[dict, list[dict]]:
     같은 봉에서 청산 후 재진입이 허용된다.
     bars 에 'bull' 열이 있으면 추세 필터(추천C)를 적용하고, 없으면 추천B 그대로다.
     필터가 막은 진입은 상태를 바꾸지 않고 BLOCK 이벤트만 남긴다.
+    차단 중 하드스탑은 HOLD_WAIT 를 남기고 hard_wait 에 기록해 두었다가, 차단이 풀린 첫 봉에서
+    SELL_RELEASE 로 판다. 보류 중 +10% 에 닿으면 보류를 지우고 트레일링 규칙으로 돌아간다.
+    'known' 열이 False 면(SOX 시세 장애) 차단 여부를 모르므로 보류하지 않고 평소대로 판다.
     """
     st = dict(state)
     events: list[dict] = []
@@ -161,16 +165,31 @@ def process(state: dict, bars: pd.DataFrame) -> tuple[dict, list[dict]]:
 
             if st["status"] == "HOLD" and close >= entry * (1 + ARM_PCT):
                 st["status"] = "ARMED"
+                st.pop("hard_wait", None)
                 events.append({
                     "kind": "ARM", "at": stamp, "price": close,
                     "entry": entry, "ret": close / entry - 1,
                 })
 
+            has_gate = "bull" in row.index
+            bull = has_gate and bool(row["bull"])
+            blocked = has_gate and not bull and bool(row.get("known", True))
+
             reason = None
             if st["status"] == "ARMED" and close <= float(st["peak"]) * (1 - TRAIL_PCT):
                 reason = "TRAIL"
+            elif st.get("hard_wait"):
+                if bull:
+                    reason = "RELEASE"
             elif close <= entry * (1 - HARD_PCT):
-                reason = "HARD"
+                if blocked:
+                    st["hard_wait"] = {"at": stamp, "price": close}
+                    events.append({
+                        "kind": "HOLD_WAIT", "at": stamp, "price": close,
+                        "entry": entry, "ret": close / entry - 1,
+                    })
+                else:
+                    reason = "HARD"
 
             if reason:
                 events.append({
@@ -178,8 +197,10 @@ def process(state: dict, bars: pd.DataFrame) -> tuple[dict, list[dict]]:
                     "entry": entry, "peak": float(st["peak"]),
                     "ret": close / entry - 1,
                     "held_since": st["entry_time"],
+                    "wait": st.get("hard_wait"),
                 })
                 st.update(status="FLAT", entry=None, peak=None, entry_time=None)
+                st.pop("hard_wait", None)
 
         if st["status"] == "FLAT" and pd.notna(rsi) and float(rsi) <= RSI_TH:
             if "bull" in row.index and not bool(row["bull"]):
